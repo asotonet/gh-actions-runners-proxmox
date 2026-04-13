@@ -36,21 +36,19 @@ check_dependencies() {
         missing+=("curl")
     fi
     
-    if ! command -v jq >/dev/null 2>&1; then
-        missing+=("jq")
+    # jq es opcional - usamos grep/sed como fallback
+    if command -v jq >/dev/null 2>&1; then
+        echo "✅ jq disponible"
+    else
+        echo "⚠️  jq no disponible - usando modo fallback (grep/sed)"
     fi
     
     if [[ ${#missing[@]} -gt 0 ]]; then
         echo "❌ Dependencias faltantes: ${missing[*]}"
         echo ""
         echo "📦 Instalar en Windows (Git Bash):"
-        echo "   winget install jqlang.jq"
-        echo ""
-        echo "📦 Instalar en WSL/Ubuntu:"
-        echo "   sudo apt install jq curl"
-        echo ""
-        echo "📦 Instalar en macOS:"
-        echo "   brew install jq curl"
+        echo "   curl -L https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-win64.exe -o /usr/bin/jq.exe"
+        echo "   chmod +x /usr/bin/jq.exe"
         return 1
     fi
     
