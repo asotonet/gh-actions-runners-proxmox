@@ -3,7 +3,9 @@
     "allow": [
       "Bash(git add *)",
       "Bash(git commit *)",
-      "Bash(git *)"
+      "Bash(git *)",
+      "Bash(true)",
+      "Bash(dir *)"
     ]
   },
   "$version": 3

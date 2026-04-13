@@ -5,6 +5,109 @@
 ###############################################################################
 
 # ==============================================================================
+# Funciones de ejecución remota vía SSH
+# ==============================================================================
+
+# Construir comando SSH base
+build_ssh_cmd() {
+    local cmd="$1"
+    
+    local ssh_user="${PROXMOX_SSH_USER:-root}"
+    local ssh_host="${PROXMOX_SSH_HOST:-$PROXMOX_HOST}"
+    local ssh_port="${PROXMOX_SSH_PORT:-22}"
+    
+    local ssh_opts="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+    ssh_opts+=" -p $ssh_port"
+    
+    if [[ -n "${PROXMOX_SSH_KEY:-}" ]]; then
+        ssh_opts+=" -i $PROXMOX_SSH_KEY"
+    fi
+    
+    if [[ -n "${PROXMOX_SSH_PASSWORD:-}" ]]; then
+        # Usar sshpass si está disponible
+        if command -v sshpass >/dev/null 2>&1; then
+            echo "sshpass -p '$PROXMOX_SSH_PASSWORD' ssh $ssh_opts ${ssh_user}@${ssh_host} '$cmd'"
+        else
+            log_error "sshpass no está instalado. Instalar: apt install sshpass"
+            return 1
+        fi
+    else
+        echo "ssh $ssh_opts ${ssh_user}@${ssh_host} '$cmd'"
+    fi
+}
+
+# Ejecutar comando en el host de Proxmox vía SSH
+exec_on_proxmox_host() {
+    local cmd="$1"
+    
+    if [[ "${EXEC_MODE:-local}" == "ssh" ]]; then
+        local ssh_cmd
+        ssh_cmd=$(build_ssh_cmd "$cmd")
+        
+        if [[ $? -ne 0 ]]; then
+            return 1
+        fi
+        
+        log "   🔧 SSH> $cmd"
+        
+        local output
+        output=$(eval "$ssh_cmd" 2>&1)
+        local exit_code=$?
+        
+        if [[ -n "$output" ]]; then
+            log "   📤 $output"
+        fi
+        
+        return $exit_code
+    else
+        # Ejecución local (desde el host de Proxmox)
+        log "   🔧 LOCAL> $cmd"
+        eval "$cmd" 2>&1
+        return $?
+    fi
+}
+
+# Ejecutar comando dentro de un contenedor LXC
+execute_in_container() {
+    local ct_id="$1"
+    local command="$2"
+    local run_as_user="${3:-root}"
+    
+    log "   [@$ct_id] $command"
+    
+    local pct_cmd
+    if [[ "$run_as_user" == "root" ]]; then
+        pct_cmd="pct exec $ct_id -- bash -c '$command'"
+    else
+        pct_cmd="pct exec $ct_id -- sudo -u $run_as_user bash -c '$command'"
+    fi
+    
+    # Ejecutar vía SSH o localmente
+    if [[ "${EXEC_MODE:-local}" == "ssh" ]]; then
+        local ssh_cmd
+        ssh_cmd=$(build_ssh_cmd "$pct_cmd")
+        
+        if [[ $? -ne 0 ]]; then
+            return 1
+        fi
+        
+        local output
+        output=$(eval "$ssh_cmd" 2>&1)
+        local exit_code=$?
+        
+        if [[ -n "$output" ]]; then
+            log "   📤 $output"
+        fi
+        
+        return $exit_code
+    else
+        # Ejecución local
+        eval "$pct_cmd" 2>&1
+        return $?
+    fi
+}
+
+# ==============================================================================
 # Funciones de logging
 # ==============================================================================
 

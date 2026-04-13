@@ -156,9 +156,11 @@ configure_lxc_for_docker() {
         log "✅ lxc.cap.drop: - Aplicado"
         log "✅ lxc.cgroup2.devices.allow: a - Aplicado"
         log "✅ features: nesting=1,keyctl=1 - Aplicado"
-        log ""
-        log "⚠️  IMPORTANTE: Reiniciar el contenedor para aplicar cambios:"
-        log "   pct shutdown $ct_id && pct start $ct_id"
+        
+        # Reiniciar contenedor para aplicar cambios
+        log "🔄 Reiniciando contenedor para aplicar cambios..."
+        exec_on_proxmox_host "pct shutdown $ct_id --timeout 30 && sleep 3 && pct start $ct_id"
+        sleep 10
     else
         log "⚠️  No se pudo aplicar configuración via API"
         log "💡 Aplica manualmente en /etc/pve/lxc/${ct_id}.conf:"
@@ -166,7 +168,6 @@ configure_lxc_for_docker() {
         log "   lxc.apparmor.profile: unconfined"
         log "   lxc.cap.drop:"
         log "   lxc.cgroup2.devices.allow: a"
-        log "   lxc.mount.entry: /dev/fuse dev/fuse none bind,create=file,optional 0 0"
         log ""
         log "   Luego reinicia: pct shutdown ${ct_id} && pct start ${ct_id}"
     fi
