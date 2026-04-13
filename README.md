@@ -92,7 +92,7 @@ Crear un archivo `config/config.env` basado en `config/config.example.env`:
 | `PROXMOX_USER` | Usuario de Proxmox | `root@pam` |
 | `PROXMOX_PASSWORD` | Contraseña de Proxmox | `tu_password` |
 | `PROXMOX_NODE` | Nodo de Proxmox | `pve` |
-| `GITHUB_TOKEN` | Token de GitHub | `ghp_xxxxx` |
+| `GITHUB_TOKEN` | Token de acceso personal de GitHub | `ghp_xxxxx` |
 | `RUNNER_VERSION` | Versión del runner | `2.311.0` |
 | `LXC_TEMPLATE` | ID del template LXC | `ubuntu-22.04-standard` |
 | `LXC_STORAGE` | Almacenamiento para LXC | `local-lvm` |
@@ -103,6 +103,16 @@ Crear un archivo `config/config.env` basado en `config/config.example.env`:
 | `LXC_NESTING` | Habilitar nestificación | `1` (requerido para Docker) |
 | `LXC_KEYCTL` | Habilitar keyctl | `1` (requerido para Docker) |
 | `DOCKER_VERSION` | Versión de Docker | `24.0.7` |
+| `RUNNER_USER` | Nombre del usuario dedicado | `runner` |
+
+### ⚠️ Importante sobre los tokens de GitHub
+
+- **`GITHUB_TOKEN`**: Es tu **Personal Access Token (PAT)** con permisos de administrador del repositorio u organización. Este token se usa para llamar a la API de GitHub y **NO caduca con cada runner**.
+- **Token de registro del runner**: El script solicita automáticamente un **token nuevo y de un solo uso** por cada runner que creas. Este token:
+  - ✅ Se genera automáticamente vía API de GitHub
+  - ⏱️ Expira en 1 hora
+  - 🔒 Solo se puede usar UNA vez
+  - 🔄 Cada runner requiere un token diferente
 
 ## 🔒 Seguridad
 

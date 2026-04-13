@@ -292,6 +292,7 @@ execute_in_container() {
 get_github_runner_token() {
     local repo="$1"
     local org="$2"
+    local runner_name="$3"
     
     local url
     if [[ -n "$repo" ]]; then
@@ -303,6 +304,9 @@ get_github_runner_token() {
         return 1
     fi
     
+    log "🔑 Solicitando nuevo token de registro para runner '$runner_name'..."
+    log "   ⚠️  IMPORTANTE: Cada token es de un solo uso y expira en 1 hora"
+    
     local response
     response=$(curl -s -X GET "$url" \
         -H "Accept: application/vnd.github+json" \
@@ -311,12 +315,18 @@ get_github_runner_token() {
     
     local token
     token=$(echo "$response" | jq -r '.token // empty')
+    local expires_at
+    expires_at=$(echo "$response" | jq -r '.expires_at // empty')
     
     if [[ -z "$token" ]]; then
         log "❌ Error al obtener el token de registro de GitHub"
         log "Response: $response"
         return 1
     fi
+    
+    log "✅ Token de registro generado exitosamente"
+    log "   📅 Expira en: $expires_at"
+    log "   🔒 Token de un solo uso (no reutilizable)"
     
     echo "$token"
 }
@@ -485,10 +495,18 @@ main() {
     # Paso 5: Instalar Docker Engine y añadir usuario al grupo docker
     install_docker_in_container "$CT_ID"
     
-    # Paso 6: Obtener token de registro de GitHub
-    log "🔑 Obteniendo token de registro de GitHub..."
+    # Paso 6: Obtener token de registro de GitHub (UN TOKEN NUEVO POR RUNNER)
+    log "================================================"
+    log "🔑 Generando token de registro de GitHub..."
+    log "   Cada runner requiere un token único y de un solo uso"
+    log "================================================"
     local token
-    token=$(get_github_runner_token "$REPO" "$ORG")
+    token=$(get_github_runner_token "$REPO" "$ORG" "$RUNNER_NAME")
+    
+    if [[ $? -ne 0 || -z "$token" ]]; then
+        log "❌ No se pudo obtener el token de registro. Abortando..."
+        exit 1
+    fi
     
     # Paso 7: Instalar y configurar el runner en el home del usuario
     install_runner_in_user_home "$CT_ID" "$RUNNER_NAME" "$token" "$repo_or_org" "$ORG" "$LABELS"
