@@ -93,17 +93,19 @@ create_lxc_container() {
     local nesting="${LXC_NESTING:-1}"
     local keyctl="${LXC_KEYCTL:-1}"
     
-    # Parámetros de creación
+    # Parámetros de creación (formato correcto de API Proxmox)
     local create_params="vmid=$ct_id"
     create_params+="&hostname=$ct_name"
     create_params+="&storage=$LXC_STORAGE"
-    create_params+="&template=$LXC_TEMPLATE"
+    # IMPORTANTE: ostemplate, NO template
+    create_params+="&ostemplate=$LXC_TEMPLATE"
     create_params+="&memory=$memory"
     create_params+="&cores=$cpus"
     create_params+="&rootfs=$LXC_STORAGE:${disk}"
     create_params+="&unprivileged=$unprivileged"
-    create_params+="&features=nesting=$nesting,keyctl=$keyctl"
-    
+    # Formato correcto: key1=val1,key2=val2
+    create_params+="&features=nesting=${nesting},keyctl=${keyctl}"
+
     # Configurar red básica
     create_params+="&net0=name=eth0,bridge=vmbr0,ip=dhcp"
     
