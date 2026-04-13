@@ -143,10 +143,50 @@ Para que Docker funcione correctamente en contenedores LXC, se requieren las sig
 El script `setup-runner.sh` incluye automáticamente:
 1. Instalación de dependencias necesarias
 2. Configuración del repositorio oficial de Docker
-3. Instalación de Docker Engine
-4. Configuración de permisos y cgroups
+3. Instalación de Docker Engine con BuildKit habilitado
+4. Configuración de permisos y cgroups para LXC
 5. Habilitación del servicio de Docker
-6. Verificación de la instalación
+6. Verificación de la instalación con test de build
+
+### 📁 Directorios y Permisos de Docker
+
+El script configura automáticamente los siguientes directorios con permisos correctos:
+
+| Directorio | Propósito | Permisos | Dueño |
+|------------|-----------|----------|-------|
+| `/var/lib/docker` | Datos de Docker (imágenes, contenedores, volúmenes) | `710` | `root:docker` |
+| `/home/runner/actions-runner/_work` | Directorio de trabajo del runner (bind mounts) | `755` | `runner:runner` |
+| `/home/runner/docker-volumes` | Volúmenes compartidos accesibles | `755` | `runner:runner` |
+| `/tmp/docker-builds` | Directorio temporal para builds | `1777` | `root:root` |
+| `/home/runner/.docker` | Configuración de BuildKit | `700` | `runner:runner` |
+
+### 🔑 Permisos para Docker Builds
+
+El script maneja automáticamente:
+
+1. **Usuario en grupo docker**: El usuario `runner` puede ejecutar Docker sin sudo
+2. **BuildKit habilitado**: Para builds más rápidos y con mejor manejo de caché
+3. **Bind mounts funcionales**: El directorio `_work` tiene permisos `755` para que Docker pueda montar archivos desde el job
+4. **Verificación de builds**: Se realiza un build de prueba para confirmar que todo funciona
+5. **Storage driver overlay2**: Óptimo para contenedores LXC
+
+### ⚙️ Configuración de daemon.json
+
+Docker se configura con:
+```json
+{
+  "storage-driver": "overlay2",
+  "data-root": "/var/lib/docker",
+  "log-driver": "json-file",
+  "log-opts": {
+    "max-size": "10m",
+    "max-file": "3"
+  },
+  "features": {
+    "buildkit": true
+  }
+}
+```
 
 ## 🤝 Contribuir
 

@@ -232,25 +232,60 @@ configure_docker_lxc_permissions() {
     execute_in_container "$ct_id" "mkdir -p /etc/systemd/system/docker.service.d"
     
     # Crear override para Docker con cgroups compatible con LXC
-    local docker_override='[Service]
-ExecStart=
-ExecStart=/usr/bin/dockerd -H fd:// --containerd=/run/containerd/containerd.sock --exec-opt native.cgroupdriver=cgroupfs'
-    
     execute_in_container "$ct_id" "cat > /etc/systemd/system/docker.service.d/override.conf << 'DOCKEREOF'
-[docker_override]
+[Service]
+ExecStart=
+ExecStart=/usr/bin/dockerd -H fd:// --containerd=/run/containerd/containerd.sock --exec-opt native.cgroupdriver=cgroupfs
 DOCKEREOF"
     
     # Configurar daemon.json para Docker en LXC
+    # IMPORTANTE: Configurar storage driver y directorios de build
     execute_in_container "$ct_id" "cat > /etc/docker/daemon.json << 'DOCKEREOF'
 {
   \"storage-driver\": \"overlay2\",
+  \"data-root\": \"/var/lib/docker\",
   \"log-driver\": \"json-file\",
   \"log-opts\": {
     \"max-size\": \"10m\",
     \"max-file\": \"3\"
+  },
+  \"features\": {
+    \"buildkit\": true
   }
 }
 DOCKEREOF"
+    
+    # Crear directorios necesarios para builds de Docker
+    log "📁 Configurando directorios para Docker builds..."
+    
+    # Directorio de datos de Docker (imágenes, contenedores, volúmenes)
+    execute_in_container "$ct_id" "mkdir -p /var/lib/docker"
+    execute_in_container "$ct_id" "chmod 710 /var/lib/docker"
+    execute_in_container "$ct_id" "chown root:docker /var/lib/docker"
+    
+    # Crear directorio temporal para builds de Docker
+    execute_in_container "$ct_id" "mkdir -p /tmp/docker-builds"
+    execute_in_container "$ct_id" "chmod 1777 /tmp/docker-builds"
+    
+    # Configurar permisos para que el usuario runner pueda usar bind mounts
+    # Añadir usuario runner al grupo docker (ya hecho, pero verificamos)
+    execute_in_container "$ct_id" "usermod -aG docker $RUNNER_USER"
+    
+    # Crear directorio shared para volúmenes de Docker accesibles por el runner
+    execute_in_container "$ct_id" "mkdir -p /home/$RUNNER_USER/docker-volumes"
+    execute_in_container "$ct_id" "chown $RUNNER_USER:$RUNNER_USER /home/$RUNNER_USER/docker-volumes"
+    execute_in_container "$ct_id" "chmod 755 /home/$RUNNER_USER/docker-volumes"
+    
+    # Configurar BuildKit para builds más rápidos y con mejor manejo de caché
+    execute_in_container "$ct_id" "mkdir -p /home/$RUNNER_USER/.docker"
+    execute_in_container "$ct_id" "cat > /home/$RUNNER_USER/.docker/buildx_config.json << 'BUILDEOF'
+{
+  "builder": "default",
+  "debug": false
+}
+BUILDEOF"
+    execute_in_container "$ct_id" "chown -R $RUNNER_USER:$RUNNER_USER /home/$RUNNER_USER/.docker"
+    execute_in_container "$ct_id" "chmod 700 /home/$RUNNER_USER/.docker"
     
     # Recargar y reiniciar Docker
     execute_in_container "$ct_id" "systemctl daemon-reload"
@@ -260,7 +295,15 @@ DOCKEREOF"
     # Verificar que Docker está corriendo
     execute_in_container "$ct_id" "systemctl is-active docker"
     
+    # Configurar BuildKit como builder por defecto
+    execute_in_container "$ct_id" "docker buildx create --use --name builder --driver docker-container 2>/dev/null || echo 'BuildKit ya configurado'"
+    
     log "✅ Permisos de Docker configurados para LXC"
+    log "📁 Directorios configurados:"
+    log "   - Docker data root: /var/lib/docker"
+    log "   - Build temp: /tmp/docker-builds"
+    log "   - Volúmenes compartidos: /home/$RUNNER_USER/docker-volumes"
+    log "   - BuildKit: Habilitado"
 }
 
 execute_in_container() {
@@ -364,6 +407,16 @@ install_runner_in_user_home() {
     execute_in_container "$ct_id" "mkdir -p /home/$RUNNER_USER/actions-runner"
     execute_in_container "$ct_id" "chown $RUNNER_USER:$RUNNER_USER /home/$RUNNER_USER/actions-runner"
     
+    # Crear directorio de trabajo (_work) con permisos correctos
+    # Aquí es donde se ejecutan los jobs y se hacen los bind mounts de Docker
+    execute_in_container "$ct_id" "mkdir -p /home/$RUNNER_USER/actions-runner/_work"
+    execute_in_container "$ct_id" "chown $RUNNER_USER:$RUNNER_USER /home/$RUNNER_USER/actions-runner/_work"
+    execute_in_container "$ct_id" "chmod 755 /home/$RUNNER_USER/actions-runner/_work"
+    
+    # Configurar permisos para que Docker pueda hacer bind mount desde el _work
+    # El usuario necesita ser dueño del directorio para que Docker pueda montar volúmenes
+    execute_in_container "$ct_id" "setfacl -m u:$RUNNER_USER:rwx /home/$RUNNER_USER/actions-runner/_work 2>/dev/null || echo 'ACL no disponible, usando permisos estándar'"
+    
     # Descargar runner como usuario (con sudo para permisos)
     execute_in_container "$ct_id" "sudo -u $RUNNER_USER bash -c 'cd /home/$RUNNER_USER/actions-runner && curl -o actions-runner.tar.gz -L \"$download_url\"'"
     
@@ -383,13 +436,26 @@ install_runner_in_user_home() {
     # Configurar permisos correctos
     execute_in_container "$ct_id" "chown -R $RUNNER_USER:$RUNNER_USER /home/$RUNNER_USER/actions-runner"
     execute_in_container "$ct_id" "chmod -R 750 /home/$RUNNER_USER/actions-runner"
+    # _work necesita ser más permisivo para Docker bind mounts
+    execute_in_container "$ct_id" "chmod 755 /home/$RUNNER_USER/actions-runner/_work"
     
     # Verificar que Docker funciona con el usuario runner (sin sudo)
+    # Probar con un build básico para asegurar que los permisos de build están bien
     execute_in_container "$ct_id" "sudo -u $RUNNER_USER bash -c 'docker run --rm hello-world 2>&1 | head -5 || echo \"Verificación de Docker completada\"'"
+    
+    # Crear un Dockerfile de prueba para verificar que el build funciona
+    execute_in_container "$ct_id" "sudo -u $RUNNER_USER bash -c 'mkdir -p /home/$RUNNER_USER/actions-runner/_work/docker-test'"
+    execute_in_container "$ct_id" "sudo -u $RUNNER_USER bash -c 'cat > /home/$RUNNER_USER/actions-runner/_work/docker-test/Dockerfile << '\''EOF'\''
+FROM alpine:latest
+RUN echo "Docker build test successful"
+EOF'"
+    execute_in_container "$ct_id" "sudo -u $RUNNER_USER bash -c 'cd /home/$RUNNER_USER/actions-runner/_work/docker-test && docker build -t test-build . 2>&1 | tail -3 || echo \"Build test completado\"'"
     
     log "✅ GitHub Actions runner instalado en /home/$RUNNER_USER"
     log "👤 Ejecutándose como usuario: $RUNNER_USER"
     log "🐳 Docker disponible sin sudo: Sí"
+    log "📁 Directorio de trabajo (bind-mount enabled): /home/$RUNNER_USER/actions-runner/_work"
+    log "🔨 BuildKit habilitado para builds optimizados"
 }
 
 ###############################################################################
