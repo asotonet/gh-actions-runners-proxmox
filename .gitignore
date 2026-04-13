@@ -1,0 +1,54 @@
+# Archivos de configuración con credenciales
+config/config.env
+
+# Logs
+logs/
+*.log
+
+# Archivos temporales
+*.tmp
+*.bak
+*.swp
+*~
+
+# Directorios de entorno virtual
+venv/
+env/
+.env/
+
+# Archivos específicos del sistema
+.DS_Store
+Thumbs.db
+
+# IDE y editores
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# Variables de entorno
+.env
+.env.local
+.env.*.local
+
+# Archivos de shell con datos sensibles
+*-secrets.*
+
+# Temporales de ejecución
+tmp/
+temp/
+
+# Backup files
+*.backup
+*.old
+
+# Certificados y claves
+*.pem
+*.key
+*.crt
+certs/
+
+# Archivos de la VM
+*.qcow2
+*.raw
+*.vmdk

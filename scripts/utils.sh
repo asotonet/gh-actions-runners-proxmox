@@ -1,0 +1,367 @@
+#!/bin/bash
+###############################################################################
+# utils.sh
+# Funciones auxiliares para la gestión de GitHub Actions runners en Proxmox
+###############################################################################
+
+# ==============================================================================
+# Funciones de logging
+# ==============================================================================
+
+log_debug() {
+    if [[ "${LOG_LEVEL:-INFO}" == "DEBUG" ]]; then
+        log "[DEBUG] $1"
+    fi
+}
+
+log_info() {
+    log "[INFO] $1"
+}
+
+log_warn() {
+    log "[WARN] $1"
+}
+
+log_error() {
+    log "[ERROR] $1" >&2
+}
+
+# ==============================================================================
+# Funciones de la API de Proxmox
+# ==============================================================================
+
+# Obtener ticket de autenticación de Proxmox
+get_proxmox_ticket() {
+    local response
+    response=$(curl -s -k -X POST \
+        "https://${PROXMOX_HOST}:${PROXMOX_PORT}/api2/json/access/ticket" \
+        -d "username=${PROXMOX_USER}&password=${PROXMOX_PASSWORD}" 2>/dev/null)
+    
+    local ticket
+    ticket=$(echo "$response" | jq -r '.data.ticket // empty')
+    
+    if [[ -z "$ticket" ]]; then
+        log_error "Error al obtener ticket de Proxmox"
+        log_error "Response: $response"
+        return 1
+    fi
+    
+    echo "$ticket"
+}
+
+# Obtener CSRF token de Proxmox
+get_proxmox_csrf() {
+    local response
+    response=$(curl -s -k -X POST \
+        "https://${PROXMOX_HOST}:${PROXMOX_PORT}/api2/json/access/ticket" \
+        -d "username=${PROXMOX_USER}&password=${PROXMOX_PASSWORD}" 2>/dev/null)
+    
+    local csrf
+    csrf=$(echo "$response" | jq -r '.data.CSRFPreventionToken // empty')
+    
+    if [[ -z "$csrf" ]]; then
+        log_error "Error al obtener CSRF token de Proxmox"
+        return 1
+    fi
+    
+    echo "$csrf"
+}
+
+# Realizar petición a la API de Proxmox
+proxmox_api_request() {
+    local endpoint="$1"
+    local params="$2"
+    local method="${3:-GET}"
+    
+    local ticket
+    ticket=$(get_proxmox_ticket)
+    
+    if [[ $? -ne 0 ]]; then
+        return 1
+    fi
+    
+    local csrf
+    csrf=$(get_proxmox_csrf)
+    
+    if [[ $? -ne 0 ]]; then
+        return 1
+    fi
+    
+    local url="https://${PROXMOX_HOST}:${PROXMOX_PORT}/api2/json${endpoint}"
+    
+    local curl_opts=(
+        -s -k
+        -X "$method"
+        -H "Authorization: PVEAuthCookie=$ticket"
+        -H "CSRFPreventionToken: $csrf"
+    )
+    
+    if [[ "$method" == "POST" || "$method" == "PUT" ]]; then
+        curl_opts+=(-H "Content-Type: application/x-www-form-urlencoded")
+        if [[ -n "$params" ]]; then
+            curl_opts+=(-d "$params")
+        fi
+    fi
+    
+    curl_opts+=("$url")
+    
+    local response
+    response=$(curl "${curl_opts[@]}" 2>/dev/null)
+    
+    echo "$response"
+}
+
+# ==============================================================================
+# Funciones de gestión de VMs
+# ==============================================================================
+
+# Generar nuevo ID de VM disponible
+generate_vm_id() {
+    local start_id="${1:-100}"
+    local end_id="${2:-999}"
+    
+    # Obtener VMs existentes
+    local existing_vms
+    existing_vms=$(proxmox_api_request "/nodes/$PROXMOX_NODE/qemu" "" "GET")
+    
+    # Extraer IDs existentes
+    local used_ids
+    used_ids=$(echo "$existing_vms" | jq -r '.data[].vmid // empty' 2>/dev/null)
+    
+    # Buscar ID disponible
+    for id in $(seq "$start_id" "$end_id"); do
+        if ! echo "$used_ids" | grep -q "^${id}$"; then
+            echo "$id"
+            return 0
+        fi
+    done
+    
+    log_error "No hay IDs de VM disponibles en el rango $start_id-$end_id"
+    return 1
+}
+
+# Verificar si una VM existe
+vm_exists() {
+    local vm_id="$1"
+    
+    local response
+    response=$(proxmox_api_request "/nodes/$PROXMOX_NODE/qemu/$vm_id/status/current" "" "GET")
+    
+    if echo "$response" | jq -e '.data' >/dev/null 2>&1; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+# Iniciar VM
+start_vm() {
+    local vm_id="$1"
+    
+    log_info "Iniciando VM $vm_id..."
+    
+    local response
+    response=$(proxmox_api_request "/nodes/$PROXMOX_NODE/qemu/$vm_id/status/start" "" "POST")
+    
+    if echo "$response" | jq -e '.data' >/dev/null 2>&1; then
+        log_info "✅ VM $vm_id iniciada correctamente"
+        return 0
+    else
+        log_error "Error al iniciar VM $vm_id"
+        return 1
+    fi
+}
+
+# Detener VM
+stop_vm() {
+    local vm_id="$1"
+    
+    log_info "Deteniendo VM $vm_id..."
+    
+    local response
+    response=$(proxmox_api_request "/nodes/$PROXMOX_NODE/qemu/$vm_id/status/stop" "" "POST")
+    
+    if echo "$response" | jq -e '.data' >/dev/null 2>&1; then
+        log_info "✅ VM $vm_id detenida correctamente"
+        return 0
+    else
+        log_error "Error al detener VM $vm_id"
+        return 1
+    fi
+}
+
+# Eliminar VM
+delete_vm() {
+    local vm_id="$1"
+    
+    log_warn "Eliminando VM $vm_id..."
+    
+    # Primero detener si está corriendo
+    stop_vm "$vm_id" 2>/dev/null
+    
+    local response
+    response=$(proxmox_api_request "/nodes/$PROXMOX_NODE/qemu/$vm_id" "" "DELETE")
+    
+    if echo "$response" | jq -e '.data' >/dev/null 2>&1; then
+        log_info "✅ VM $vm_id eliminada correctamente"
+        return 0
+    else
+        log_error "Error al eliminar VM $vm_id"
+        return 1
+    fi
+}
+
+# Obtener estado de VM
+get_vm_status() {
+    local vm_id="$1"
+    
+    local response
+    response=$(proxmox_api_request "/nodes/$PROXMOX_NODE/qemu/$vm_id/status/current" "" "GET")
+    
+    local status
+    status=$(echo "$response" | jq -r '.data.status // "unknown"')
+    
+    echo "$status"
+}
+
+# Listar todas las VMs
+list_vms() {
+    local response
+    response=$(proxmox_api_request "/nodes/$PROXMOX_NODE/qemu" "" "GET")
+    
+    echo "$response" | jq -r '.data[] | "\(.vmid) | \(.name) | \(.status)"'
+}
+
+# ==============================================================================
+# Funciones de GitHub API
+# ==============================================================================
+
+# Listar runners de un repositorio
+list_repo_runners() {
+    local repo="$1"
+    
+    local url="https://api.github.com/repos/$repo/actions/runners"
+    
+    local response
+    response=$(curl -s -X GET "$url" \
+        -H "Accept: application/vnd.github+json" \
+        -H "Authorization: Bearer $GITHUB_TOKEN" \
+        -H "X-GitHub-Api-Version: 2022-11-28")
+    
+    echo "$response" | jq -r '.runners[] | "\(.id) | \(.name) | \(.status)"'
+}
+
+# Listar runners de una organización
+list_org_runners() {
+    local org="$1"
+    
+    local url="https://api.github.com/orgs/$org/actions/runners"
+    
+    local response
+    response=$(curl -s -X GET "$url" \
+        -H "Accept: application/vnd.github+json" \
+        -H "Authorization: Bearer $GITHUB_TOKEN" \
+        -H "X-GitHub-Api-Version: 2022-11-28")
+    
+    echo "$response" | jq -r '.runners[] | "\(.id) | \(.name) | \(.status)"'
+}
+
+# Eliminar runner por ID
+remove_runner_by_id() {
+    local repo="$1"
+    local org="$2"
+    local runner_id="$3"
+    
+    local url
+    if [[ -n "$repo" ]]; then
+        url="https://api.github.com/repos/$repo/actions/runners/$runner_id"
+    elif [[ -n "$org" ]]; then
+        url="https://api.github.com/orgs/$org/actions/runners/$runner_id"
+    else
+        log_error "Debes especificar repo u org"
+        return 1
+    fi
+    
+    local response
+    response=$(curl -s -X DELETE "$url" \
+        -H "Accept: application/vnd.github+json" \
+        -H "Authorization: Bearer $GITHUB_TOKEN" \
+        -H "X-GitHub-Api-Version: 2022-11-28")
+    
+    if [[ $? -eq 0 ]]; then
+        log_info "✅ Runner $runner_id eliminado de GitHub"
+        return 0
+    else
+        log_error "Error al eliminar runner de GitHub"
+        return 1
+    fi
+}
+
+# ==============================================================================
+# Funciones de validación
+# ==============================================================================
+
+# Validar formato de repositorio
+validate_repo_format() {
+    local repo="$1"
+    
+    if [[ ! "$repo" =~ ^[a-zA-Z0-9_-]+/[a-zA-Z0-9._-]+$ ]]; then
+        log_error "Formato de repositorio inválido: $repo"
+        log_error "Formato esperado: USUARIO/REPO"
+        return 1
+    fi
+    
+    return 0
+}
+
+# Validar que existen las herramientas necesarias
+check_dependencies() {
+    local deps=("curl" "jq")
+    
+    for dep in "${deps[@]}"; do
+        if ! command -v "$dep" &>/dev/null; then
+            log_error "Dependencia no encontrada: $dep"
+            log_error "Instalar con: apt install $dep"
+            return 1
+        fi
+    done
+    
+    return 0
+}
+
+# ==============================================================================
+# Funciones de utilidad general
+# ==============================================================================
+
+# Formatear timestamp
+format_timestamp() {
+    date '+%Y-%m-%d %H:%M:%S'
+}
+
+# Generar nombre aleatorio para runner
+generate_runner_name() {
+    local prefix="${1:-runner}"
+    local suffix
+    suffix=$(openssl rand -hex 4 2>/dev/null || echo $RANDOM)
+    echo "${prefix}-${suffix}"
+}
+
+# Mostrar barra de progreso simple
+show_progress() {
+    local current="$1"
+    local total="$2"
+    local width="${3:-50}"
+    
+    local percentage=$((current * 100 / total))
+    local filled=$((current * width / total))
+    local empty=$((width - filled))
+    
+    printf "\r["
+    printf '%0.s█' $(seq 1 $filled 2>/dev/null)
+    printf '%0.s░' $(seq 1 $empty 2>/dev/null)
+    printf "] %d%%" "$percentage"
+    
+    if [[ $current -eq $total ]]; then
+        echo ""
+    fi
+}
