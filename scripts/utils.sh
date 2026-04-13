@@ -190,17 +190,29 @@ generate_lxc_id() {
     local existing_cts
     existing_cts=$(proxmox_api_request "/nodes/$PROXMOX_NODE/lxc" "" "GET")
 
-    # Extraer IDs existentes
+    # Obtener VMs existentes (para evitar colisiones)
+    local existing_vms
+    existing_vms=$(proxmox_api_request "/nodes/$PROXMOX_NODE/qemu" "" "GET")
+
+    # Extraer IDs existentes (LXC + VMs)
     local used_ids=""
     if command -v jq >/dev/null 2>&1; then
-        used_ids=$(echo "$existing_cts" | jq -r '.data[].vmid // empty' 2>/dev/null)
+        local lxc_ids
+        lxc_ids=$(echo "$existing_cts" | jq -r '.data[].vmid // empty' 2>/dev/null)
+        local vm_ids
+        vm_ids=$(echo "$existing_vms" | jq -r '.data[].vmid // empty' 2>/dev/null)
+        used_ids=$(echo -e "${lxc_ids}\n${vm_ids}" | grep -v '^$' | sort -un)
     else
         # Fallback sin jq: extraer vmid con grep
-        used_ids=$(echo "$existing_cts" | grep -o '"vmid":[0-9]*' | cut -d: -f2 | sort -n)
+        local lxc_ids
+        lxc_ids=$(echo "$existing_cts" | grep -o '"vmid":[0-9]*' | cut -d: -f2)
+        local vm_ids
+        vm_ids=$(echo "$existing_vms" | grep -o '"vmid":[0-9]*' | cut -d: -f2)
+        used_ids=$(echo -e "${lxc_ids}\n${vm_ids}" | grep -v '^$' | sort -un)
     fi
 
     if [[ -z "$used_ids" ]]; then
-        log_warn "No se pudo obtener lista de contenedores existentes, usando ID por defecto: $start_id"
+        log_warn "No se pudo obtener lista de contenedores/VMs existentes, usando ID por defecto: $start_id"
         echo "$start_id"
         return 0
     fi
@@ -208,7 +220,7 @@ generate_lxc_id() {
     # Buscar ID disponible
     for id in $(seq "$start_id" "$end_id"); do
         if ! echo "$used_ids" | grep -qw "^${id}$"; then
-            log "📋 IDs usados encontrados: $(echo $used_ids | tr '\n' ', ' | sed 's/,$//')" >&2
+            log "📋 IDs usados encontrados (LXC + VMs): $(echo $used_ids | tr '\n' ', ' | sed 's/,$//')" >&2
             echo "$id"
             return 0
         fi
