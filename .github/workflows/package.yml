@@ -1,0 +1,43 @@
+name: Package
+
+on:
+  push:
+    branches: [ main, master ]
+  release:
+    types: [ published ]
+
+jobs:
+  package:
+    name: Build Package
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout código
+        uses: actions/checkout@v4
+
+      - name: Crear archivo tarball
+        run: |
+          VERSION=${GITHUB_REF_NAME:-$(date +%Y%m%d%H%M%S)}
+          PACKAGE_NAME="gh-actions-runners-proxmox-${VERSION}.tar.gz"
+          tar -czf "$PACKAGE_NAME" \
+            --exclude='.git' \
+            --exclude='logs' \
+            --exclude='config/config.env' \
+            .
+          echo "PACKAGE_NAME=$PACKAGE_NAME" >> $GITHUB_ENV
+
+      - name: Subir artefacto
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.PACKAGE_NAME }}
+          path: ${{ env.PACKAGE_NAME }}
+          retention-days: 30
+
+      - name: Subir al Release (si es tag)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v1
+        with:
+          files: ${{ env.PACKAGE_NAME }}
