@@ -185,23 +185,35 @@ proxmox_api_request() {
 generate_lxc_id() {
     local start_id="${1:-100}"
     local end_id="${2:-999}"
-    
+
     # Obtener contenedores existentes
     local existing_cts
     existing_cts=$(proxmox_api_request "/nodes/$PROXMOX_NODE/lxc" "" "GET")
-    
+
     # Extraer IDs existentes
-    local used_ids
-    used_ids=$(echo "$existing_cts" | jq -r '.data[].vmid // empty' 2>/dev/null)
-    
+    local used_ids=""
+    if command -v jq >/dev/null 2>&1; then
+        used_ids=$(echo "$existing_cts" | jq -r '.data[].vmid // empty' 2>/dev/null)
+    else
+        # Fallback sin jq: extraer vmid con grep
+        used_ids=$(echo "$existing_cts" | grep -o '"vmid":[0-9]*' | cut -d: -f2 | sort -n)
+    fi
+
+    if [[ -z "$used_ids" ]]; then
+        log_warn "No se pudo obtener lista de contenedores existentes, usando ID por defecto: $start_id"
+        echo "$start_id"
+        return 0
+    fi
+
     # Buscar ID disponible
     for id in $(seq "$start_id" "$end_id"); do
-        if ! echo "$used_ids" | grep -q "^${id}$"; then
+        if ! echo "$used_ids" | grep -qw "^${id}$"; then
+            log "📋 IDs usados encontrados: $(echo $used_ids | tr '\n' ', ' | sed 's/,$//')"
             echo "$id"
             return 0
         fi
     done
-    
+
     log_error "No hay IDs de contenedor disponibles en el rango $start_id-$end_id"
     return 1
 }

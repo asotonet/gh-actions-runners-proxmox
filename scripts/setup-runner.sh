@@ -93,26 +93,12 @@ create_lxc_container() {
     local nesting="${LXC_NESTING:-1}"
     local keyctl="${LXC_KEYCTL:-1}"
     
-    # Parámetros de creación (formato correcto de API Proxmox)
-    local create_params="vmid=$ct_id"
-    create_params+="&hostname=$ct_name"
-    create_params+="&storage=$LXC_STORAGE"
-    # IMPORTANTE: ostemplate, NO template
-    create_params+="&ostemplate=$LXC_TEMPLATE"
-    create_params+="&memory=$memory"
-    create_params+="&cores=$cpus"
-    create_params+="&rootfs=$LXC_STORAGE:${disk}"
-    create_params+="&unprivileged=$unprivileged"
-    # Features: formato correcto
-    create_params+="&features=nesting=${nesting}"
-    if [[ "$keyctl" == "1" ]]; then
-        create_params+=",keyctl=${keyctl}"
-    fi
-
-    # Configurar red básica: formato correcto
-    create_params+="&net0=name=eth0"
-    create_params+=",bridge=vmbr0"
-    create_params+=",ip=dhcp"
+    # Parámetros de creación
+    # IMPORTANTE: Las comas dentro de features y net0 deben ser %2C para no confundirse con separadores
+    local features_encoded="nesting%3D${nesting}%2Ckeyctl%3D${keyctl}"
+    local net0_encoded="name%3Deth0%2Cbridge%3Dvmbr0%2Cip%3Ddhcp"
+    
+    local create_params="vmid=${ct_id}&hostname=${ct_name}&storage=${LXC_STORAGE}&ostemplate=${LXC_TEMPLATE}&memory=${memory}&cores=${cpus}&rootfs=${LXC_STORAGE}%3A${disk}&unprivileged=${unprivileged}&features=${features_encoded}&net0=${net0_encoded}"
     
     local response
     response=$(proxmox_api_request "/nodes/$PROXMOX_NODE/lxc" "$create_params" "POST")
@@ -478,28 +464,35 @@ get_github_runner_token() {
     
     log "🔑 Solicitando nuevo token de registro para runner '$runner_name'..."
     log "   ⚠️  IMPORTANTE: Cada token es de un solo uso y expira en 1 hora"
-    
+
     local response
     response=$(curl -s -X GET "$url" \
         -H "Accept: application/vnd.github+json" \
         -H "Authorization: Bearer $GITHUB_TOKEN" \
         -H "X-GitHub-Api-Version: 2022-11-28")
-    
+
     local token
-    token=$(echo "$response" | jq -r '.token // empty')
     local expires_at
-    expires_at=$(echo "$response" | jq -r '.expires_at // empty')
     
+    # Intentar con jq primero, fallback a grep/sed
+    if command -v jq >/dev/null 2>&1; then
+        token=$(echo "$response" | jq -r '.token // empty')
+        expires_at=$(echo "$response" | jq -r '.expires_at // empty')
+    else
+        token=$(echo "$response" | grep -o '"token":"[^"]*"' | sed 's/"token":"//;s/"//')
+        expires_at=$(echo "$response" | grep -o '"expires_at":"[^"]*"' | sed 's/"expires_at":"//;s/"//')
+    fi
+
     if [[ -z "$token" ]]; then
         log "❌ Error al obtener el token de registro de GitHub"
         log "Response: $response"
         return 1
     fi
-    
+
     log "✅ Token de registro generado exitosamente"
     log "   📅 Expira en: $expires_at"
     log "   🔒 Token de un solo uso (no reutilizable)"
-    
+
     echo "$token"
 }
 
