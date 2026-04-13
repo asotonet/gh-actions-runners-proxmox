@@ -95,10 +95,21 @@ create_lxc_container() {
     
     # Parámetros de creación
     # IMPORTANTE: Las comas dentro de features y net0 deben ser %2C para no confundirse con separadores
+    # Y ostemplate debe tener el formato: STORAGE:vztmpl/ARCHIVO.tar.zst
+    
+    local ostemplate_param
+    # Si LXC_TEMPLATE ya incluye el storage (ej: local:vztmpl/...), usarlo tal cual
+    if echo "$LXC_TEMPLATE" | grep -q ":"; then
+        ostemplate_param="$LXC_TEMPLATE"
+    else
+        # Si no, construir con el storage de templates (local)
+        ostemplate_param="local:vztmpl/${LXC_TEMPLATE}"
+    fi
+    
     local features_encoded="nesting%3D${nesting}%2Ckeyctl%3D${keyctl}"
     local net0_encoded="name%3Deth0%2Cbridge%3Dvmbr0%2Cip%3Ddhcp"
     
-    local create_params="vmid=${ct_id}&hostname=${ct_name}&storage=${LXC_STORAGE}&ostemplate=${LXC_TEMPLATE}&memory=${memory}&cores=${cpus}&rootfs=${LXC_STORAGE}%3A${disk}&unprivileged=${unprivileged}&features=${features_encoded}&net0=${net0_encoded}"
+    local create_params="vmid=${ct_id}&hostname=${ct_name}&storage=${LXC_STORAGE}&ostemplate=${ostemplate_param}&memory=${memory}&cores=${cpus}&rootfs=${LXC_STORAGE}%3A${disk}&unprivileged=${unprivileged}&features=${features_encoded}&net0=${net0_encoded}"
     
     local response
     response=$(proxmox_api_request "/nodes/$PROXMOX_NODE/lxc" "$create_params" "POST")
