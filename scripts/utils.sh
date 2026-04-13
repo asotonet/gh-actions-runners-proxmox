@@ -21,6 +21,13 @@ parse_json() {
     fi
 }
 
+# Función log por defecto (se sobrescribe en el script principal si existe)
+# Esto evita "command not found" cuando utils.sh se carga antes de definir log
+log() {
+    local message="[$(date '+%Y-%m-%d %H:%M:%S')] $1"
+    echo "$message"
+}
+
 # Verificar dependencias necesarias
 check_dependencies() {
     local missing=()
@@ -38,7 +45,6 @@ check_dependencies() {
         echo ""
         echo "📦 Instalar en Windows (Git Bash):"
         echo "   winget install jqlang.jq"
-        echo "   winget install Git.Git"
         echo ""
         echo "📦 Instalar en WSL/Ubuntu:"
         echo "   sudo apt install jq curl"
