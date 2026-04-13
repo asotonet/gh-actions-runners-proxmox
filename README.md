@@ -13,6 +13,8 @@ Características principales:
 - Gestionar el ciclo de vida de los runners
 - Configurar runners para repositorios u organizaciones
 - Monitorizar el estado de los runners
+- Verificación de salud del runner
+- Backup automático de configuración
 
 ## 🚀 Requisitos
 
@@ -30,22 +32,33 @@ Características principales:
 ```
 gh-actions-runners-proxmox/
 ├── README.md                 # Documentación del proyecto
+├── QUICKSTART.md             # Guía de inicio rápido (15 min)
 ├── config/
 │   └── config.example.env    # Plantilla de configuración
 ├── scripts/
 │   ├── setup-runner.sh       # Script principal de configuración
 │   ├── remove-runner.sh      # Script para eliminar runners
 │   ├── check-runners.sh      # Script para verificar estado
+│   ├── health-check.sh       # Verificación de salud completa
+│   ├── backup-runner.sh      # Backup de configuración
 │   └── utils.sh              # Funciones auxiliares
+├── examples/
+│   └── ci-docker-workflow.yml  # Ejemplo de pipeline CI/CD
 ├── logs/                     # Directorio para logs
 └── .gitignore
 ```
+
+## 🚀 Inicio Rápido
+
+¿Quieres tener un runner funcionando en **15 minutos**?
+
+👉 Lee la [Guía de Inicio Rápido](QUICKSTART.md)
 
 ## 🔧 Instalación
 
 1. **Clonar el repositorio:**
    ```bash
-   git clone https://github.com/TU_USUARIO/gh-actions-runners-proxmox.git
+   git clone https://github.com/asotonet/gh-actions-runners-proxmox.git
    cd gh-actions-runners-proxmox
    ```
 
@@ -53,7 +66,7 @@ gh-actions-runners-proxmox/
    ```bash
    cp config/config.example.env config/config.env
    ```
-   
+
    Editar `config/config.env` con tus credenciales y configuración.
 
 3. **Dar permisos de ejecución:**
@@ -75,10 +88,22 @@ gh-actions-runners-proxmox/
 ./scripts/check-runners.sh --repo USUARIO/REPO
 ```
 
+### Verificar salud del runner
+
+```bash
+./scripts/health-check.sh
+```
+
+### Crear backup de configuración
+
+```bash
+./scripts/backup-runner.sh --compress --include-docker --include-logs
+```
+
 ### Eliminar un runner
 
 ```bash
-./scripts/remove-runner.sh --name mi-runner --repo USUARIO/REPO
+./scripts/remove-runner.sh --name mi-runner --repo USUARIO/REPO --force
 ```
 
 ## ⚙️ Variables de Configuración
@@ -116,7 +141,7 @@ Crear un archivo `config/config.env` basado en `config/config.example.env`:
 
 ## 🔒 Seguridad
 
-- ⚠️ **NUNCA** commits el archivo `config/config.env` con credenciales reales
+- ⚠️ **NUNCA** hagas commit del archivo `config/config.env` con credenciales reales
 - Usar variables de entorno para datos sensibles en CI/CD
 - Rotar regularmente los tokens de GitHub
 - Restringir permisos de la API de Proxmox
