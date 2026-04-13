@@ -133,42 +133,47 @@ proxmox_api_request() {
     local endpoint="$1"
     local params="$2"
     local method="${3:-GET}"
-    
+
     local ticket
     ticket=$(get_proxmox_ticket)
-    
+
     if [[ $? -ne 0 ]]; then
         return 1
     fi
-    
+
     local csrf
     csrf=$(get_proxmox_csrf)
-    
+
     if [[ $? -ne 0 ]]; then
         return 1
     fi
-    
+
     local url="https://${PROXMOX_HOST}:${PROXMOX_PORT}/api2/json${endpoint}"
-    
-    local curl_opts=(
-        -s -k
-        -X "$method"
-        -H "Authorization: PVEAuthCookie=$ticket"
-        -H "CSRFPreventionToken: $csrf"
-    )
-    
-    if [[ "$method" == "POST" || "$method" == "PUT" ]]; then
-        curl_opts+=(-H "Content-Type: application/x-www-form-urlencoded")
-        if [[ -n "$params" ]]; then
-            curl_opts+=(-d "$params")
-        fi
-    fi
-    
-    curl_opts+=("$url")
-    
+
     local response
-    response=$(curl "${curl_opts[@]}" 2>/dev/null)
-    
+
+    if [[ "$method" == "POST" || "$method" == "PUT" ]]; then
+        response=$(curl -s -k \
+            -X "$method" \
+            -H "Authorization: PVEAuthCookie=$ticket" \
+            -H "CSRFPreventionToken: $csrf" \
+            -H "Content-Type: application/x-www-form-urlencoded" \
+            -d "$params" \
+            "$url" 2>/dev/null)
+    elif [[ "$method" == "DELETE" ]]; then
+        response=$(curl -s -k \
+            -X "$method" \
+            -H "Authorization: PVEAuthCookie=$ticket" \
+            -H "CSRFPreventionToken: $csrf" \
+            "$url" 2>/dev/null)
+    else
+        response=$(curl -s -k \
+            -X GET \
+            -H "Authorization: PVEAuthCookie=$ticket" \
+            -H "CSRFPreventionToken: $csrf" \
+            "$url" 2>/dev/null)
+    fi
+
     echo "$response"
 }
 

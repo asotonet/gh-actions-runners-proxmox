@@ -103,11 +103,16 @@ create_lxc_container() {
     create_params+="&cores=$cpus"
     create_params+="&rootfs=$LXC_STORAGE:${disk}"
     create_params+="&unprivileged=$unprivileged"
-    # Formato correcto: key1=val1,key2=val2
-    create_params+="&features=nesting=${nesting},keyctl=${keyctl}"
+    # Features: formato correcto
+    create_params+="&features=nesting=${nesting}"
+    if [[ "$keyctl" == "1" ]]; then
+        create_params+=",keyctl=${keyctl}"
+    fi
 
-    # Configurar red básica
-    create_params+="&net0=name=eth0,bridge=vmbr0,ip=dhcp"
+    # Configurar red básica: formato correcto
+    create_params+="&net0=name=eth0"
+    create_params+=",bridge=vmbr0"
+    create_params+=",ip=dhcp"
     
     local response
     response=$(proxmox_api_request "/nodes/$PROXMOX_NODE/lxc" "$create_params" "POST")
