@@ -112,6 +112,147 @@ proxmox_api_request() {
 }
 
 # ==============================================================================
+# Funciones de gestión de contenedores LXC
+# ==============================================================================
+
+# Generar nuevo ID de contenedor LXC disponible
+generate_lxc_id() {
+    local start_id="${1:-100}"
+    local end_id="${2:-999}"
+    
+    # Obtener contenedores existentes
+    local existing_cts
+    existing_cts=$(proxmox_api_request "/nodes/$PROXMOX_NODE/lxc" "" "GET")
+    
+    # Extraer IDs existentes
+    local used_ids
+    used_ids=$(echo "$existing_cts" | jq -r '.data[].vmid // empty' 2>/dev/null)
+    
+    # Buscar ID disponible
+    for id in $(seq "$start_id" "$end_id"); do
+        if ! echo "$used_ids" | grep -q "^${id}$"; then
+            echo "$id"
+            return 0
+        fi
+    done
+    
+    log_error "No hay IDs de contenedor disponibles en el rango $start_id-$end_id"
+    return 1
+}
+
+# Verificar si un contenedor LXC existe
+lxc_exists() {
+    local ct_id="$1"
+    
+    local response
+    response=$(proxmox_api_request "/nodes/$PROXMOX_NODE/lxc/$ct_id/status/current" "" "GET")
+    
+    if echo "$response" | jq -e '.data' >/dev/null 2>&1; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+# Iniciar contenedor LXC
+start_lxc() {
+    local ct_id="$1"
+    
+    log_info "Iniciando contenedor LXC $ct_id..."
+    
+    local response
+    response=$(proxmox_api_request "/nodes/$PROXMOX_NODE/lxc/$ct_id/status/start" "" "POST")
+    
+    if echo "$response" | jq -e '.data' >/dev/null 2>&1; then
+        log_info "✅ Contenedor LXC $ct_id iniciado correctamente"
+        return 0
+    else
+        log_error "Error al iniciar contenedor LXC $ct_id"
+        return 1
+    fi
+}
+
+# Detener contenedor LXC
+stop_lxc() {
+    local ct_id="$1"
+    
+    log_info "Deteniendo contenedor LXC $ct_id..."
+    
+    local response
+    response=$(proxmox_api_request "/nodes/$PROXMOX_NODE/lxc/$ct_id/status/stop" "" "POST")
+    
+    if echo "$response" | jq -e '.data' >/dev/null 2>&1; then
+        log_info "✅ Contenedor LXC $ct_id detenido correctamente"
+        return 0
+    else
+        log_error "Error al detener contenedor LXC $ct_id"
+        return 1
+    fi
+}
+
+# Eliminar contenedor LXC
+delete_lxc() {
+    local ct_id="$1"
+    
+    log_warn "Eliminando contenedor LXC $ct_id..."
+    
+    # Primero detener si está corriendo
+    stop_lxc "$ct_id" 2>/dev/null
+    
+    local response
+    response=$(proxmox_api_request "/nodes/$PROXMOX_NODE/lxc/$ct_id" "" "DELETE")
+    
+    if echo "$response" | jq -e '.data' >/dev/null 2>&1; then
+        log_info "✅ Contenedor LXC $ct_id eliminado correctamente"
+        return 0
+    else
+        log_error "Error al eliminar contenedor LXC $ct_id"
+        return 1
+    fi
+}
+
+# Obtener estado de contenedor LXC
+get_lxc_status() {
+    local ct_id="$1"
+    
+    local response
+    response=$(proxmox_api_request "/nodes/$PROXMOX_NODE/lxc/$ct_id/status/current" "" "GET")
+    
+    local status
+    status=$(echo "$response" | jq -r '.data.status // "unknown"')
+    
+    echo "$status"
+}
+
+# Listar todos los contenedores LXC
+list_lxc() {
+    local response
+    response=$(proxmox_api_request "/nodes/$PROXMOX_NODE/lxc" "" "GET")
+    
+    echo "$response" | jq -r '.data[] | "\(.vmid) | \(.name) | \(.status) | \(.mem // 0) | \(.disk // 0)"'
+}
+
+# Ejecutar comando en contenedor LXC
+exec_in_lxc() {
+    local ct_id="$1"
+    local command="$2"
+    local user="${3:-root}"
+    
+    # Usar pct exec para ejecutar comandos en el contenedor
+    # Nota: Esto requiere acceso directo al host de Proxmox
+    if command -v pct >/dev/null 2>&1; then
+        if [[ "$user" == "root" ]]; then
+            pct exec "$ct_id" -- bash -c "$command"
+        else
+            pct exec "$ct_id" -- sudo -u "$user" bash -c "$command"
+        fi
+    else
+        log_error "pct no está disponible. Se requiere acceso al host de Proxmox"
+        return 1
+    fi
+}
+
+# ==============================================================================
 # Funciones de gestión de VMs
 # ==============================================================================
 

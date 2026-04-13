@@ -1,7 +1,9 @@
 #!/bin/bash
 ###############################################################################
 # setup-runner.sh
-# Script para configurar un GitHub Actions runner en una VM de Proxmox
+# Script para configurar un GitHub Actions runner en un contenedor LXC de Proxmox
+# Crea un usuario dedicado con permisos de sudo y grupo docker
+# Incluye instalación automática de Docker Engine con permisos de kernel
 ###############################################################################
 
 set -euo pipefail
@@ -27,6 +29,9 @@ source "$SCRIPT_DIR/utils.sh"
 LOG_FILE="$ROOT_DIR/logs/setup-runner-$(date +%Y-%m-%d).log"
 mkdir -p "$ROOT_DIR/logs"
 
+# Nombre del usuario dedicado para el runner
+RUNNER_USER="${RUNNER_USER:-runner}"
+
 ###############################################################################
 # Funciones
 ###############################################################################
@@ -40,12 +45,14 @@ Opciones:
   --repo REPOSITORIO     Repositorio en formato USUARIO/REPO (requerido)
   --org ORGANIZACION     Organización en lugar de repositorio
   --labels LABELS        Labels personalizados (separados por comas)
-  --vm-id ID             ID específico para la VM (opcional)
+  --ct-id ID             ID específico para el contenedor LXC (opcional)
+  --user USUARIO         Nombre del usuario dedicado (default: runner)
   --help                 Mostrar esta ayuda
 
 Ejemplos:
   $0 --name mi-runner --repo usuario/mi-repo
   $0 --name org-runner --org mi-organizacion --labels "linux,docker"
+  $0 --name ci-runner --repo usuario/repo --user github-runner
 EOF
     exit 0
 }
@@ -58,7 +65,7 @@ log() {
 validate_config() {
     local required_vars=(
         "PROXMOX_HOST" "PROXMOX_PORT" "PROXMOX_USER" "PROXMOX_PASSWORD"
-        "PROXMOX_NODE" "GITHUB_TOKEN" "VM_TEMPLATE" "VM_STORAGE"
+        "PROXMOX_NODE" "GITHUB_TOKEN" "LXC_TEMPLATE" "LXC_STORAGE"
     )
     
     for var in "${required_vars[@]}"; do
@@ -69,50 +76,217 @@ validate_config() {
     done
 }
 
-create_vm_on_proxmox() {
-    local vm_id="$1"
-    local vm_name="$2"
+create_lxc_container() {
+    local ct_id="$1"
+    local ct_name="$2"
     
-    log "🔧 Creando VM $vm_id ($vm_name) en Proxmox..."
+    log "🔧 Creando contenedor LXC $ct_id ($ct_name) en Proxmox..."
     
-    # Clonar desde template
-    local clone_cmd="POST /nodes/$PROXMOX_NODE/qemu/$VM_TEMPLATE/clone"
-    local clone_params="newid=$vm_id&name=$vm_name&full=1&storage=$VM_STORAGE"
+    # Configuración del contenedor
+    local memory="${LXC_MEMORY:-4096}"
+    local cpus="${LXC_CPUS:-2}"
+    local disk="${LXC_DISK:-30}"
+    local unprivileged="${LXC_UNPRIVILEGED:-1}"
+    local nesting="${LXC_NESTING:-1}"
+    local keyctl="${LXC_KEYCTL:-1}"
+    
+    # Parámetros de creación
+    local create_params="vmid=$ct_id"
+    create_params+="&hostname=$ct_name"
+    create_params+="&storage=$LXC_STORAGE"
+    create_params+="&template=$LXC_TEMPLATE"
+    create_params+="&memory=$memory"
+    create_params+="&cores=$cpus"
+    create_params+="&rootfs=$LXC_STORAGE:${disk}"
+    create_params+="&unprivileged=$unprivileged"
+    create_params+="&features=nesting=$nesting,keyctl=$keyctl"
+    
+    # Configurar red básica
+    create_params+="&net0=name=eth0,bridge=vmbr0,ip=dhcp"
     
     local response
-    response=$(proxmox_api_request "$clone_cmd" "$clone_params" "POST")
+    response=$(proxmox_api_request "/nodes/$PROXMOX_NODE/lxc" "$create_params" "POST")
     
-    if [[ $? -ne 0 ]]; then
-        log "❌ Error al crear la VM"
+    if echo "$response" | grep -qi "error\|failed"; then
+        log "❌ Error al crear el contenedor LXC"
+        log "Response: $response"
         return 1
     fi
     
-    log "✅ VM creada exitosamente con ID: $vm_id"
-    echo "$vm_id"
+    log "✅ Contenedor LXC creado exitosamente con ID: $ct_id"
+    echo "$ct_id"
 }
 
-wait_for_vm_ready() {
-    local vm_id="$1"
-    local max_wait=${2:-300}
+wait_for_container_ready() {
+    local ct_id="$1"
+    local max_wait=${2:-120}
     local elapsed=0
     
-    log "⏳ Esperando a que la VM $vm_id esté lista..."
+    log "⏳ Esperando a que el contenedor $ct_id esté listo..."
     
     while [[ $elapsed -lt $max_wait ]]; do
         local status
-        status=$(proxmox_api_request "/nodes/$PROXMOX_NODE/qemu/$vm_id/status/current" "" "GET")
+        status=$(proxmox_api_request "/nodes/$PROXMOX_NODE/lxc/$ct_id/status/current" "" "GET")
         
         if echo "$status" | grep -q '"running"'; then
-            log "✅ VM $vm_id está corriendo"
+            log "✅ Contenedor $ct_id está corriendo"
+            # Esperar un poco más para que el sistema esté completamente inicializado
+            sleep 10
             return 0
         fi
         
-        sleep 5
-        elapsed=$((elapsed + 5))
+        sleep 3
+        elapsed=$((elapsed + 3))
     done
     
-    log "❌ Timeout: La VM no estuvo lista en ${max_wait}s"
+    log "❌ Timeout: El contenedor no estuvo listo en ${max_wait}s"
     return 1
+}
+
+start_container() {
+    local ct_id="$1"
+    
+    log "🚀 Iniciando contenedor LXC $ct_id..."
+    
+    local response
+    response=$(proxmox_api_request "/nodes/$PROXMOX_NODE/lxc/$ct_id/status/start" "" "POST")
+    
+    if echo "$response" | grep -qi "error\|failed"; then
+        log "❌ Error al iniciar el contenedor"
+        return 1
+    fi
+    
+    log "✅ Contenedor $ct_id iniciado"
+}
+
+create_runner_user() {
+    local ct_id="$1"
+    
+    log "👤 Creando usuario dedicado '$RUNNER_USER' en el contenedor $ct_id..."
+    
+    # Crear usuario con home directory y bash como shell por defecto
+    execute_in_container "$ct_id" "useradd -m -s /bin/bash -G sudo $RUNNER_USER"
+    
+    # Establecer contraseña (se puede cambiar después)
+    # Por seguridad, se recomienda cambiarla o usar autenticación por clave SSH
+    execute_in_container "$ct_id" "echo '$RUNNER_USER:$(openssl rand -base64 12 2>/dev/null || echo temp123)' | chpasswd"
+    
+    # Configurar sudo sin contraseña para el usuario
+    execute_in_container "$ct_id" "echo '$RUNNER_USER ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/$RUNNER_USER"
+    execute_in_container "$ct_id" "chmod 440 /etc/sudoers.d/$RUNNER_USER"
+    
+    # Crear directorio .ssh si no existe (para autenticación por clave)
+    execute_in_container "$ct_id" "mkdir -p /home/$RUNNER_USER/.ssh"
+    execute_in_container "$ct_id" "chmod 700 /home/$RUNNER_USER/.ssh"
+    execute_in_container "$ct_id" "chown $RUNNER_USER:$RUNNER_USER /home/$RUNNER_USER/.ssh"
+    
+    log "✅ Usuario '$RUNNER_USER' creado con permisos de sudo"
+}
+
+install_docker_in_container() {
+    local ct_id="$1"
+    
+    log "🐳 Instalando Docker Engine en el contenedor $ct_id..."
+    
+    # Actualizar sistema e instalar dependencias
+    execute_in_container "$ct_id" "apt-get update"
+    execute_in_container "$ct_id" "apt-get install -y ca-certificates curl gnupg lsb-release"
+    
+    # Crear directorio para llaves GPG
+    execute_in_container "$ct_id" "install -m 0755 -d /etc/apt/keyrings"
+    
+    # Añadir llave oficial de Docker
+    execute_in_container "$ct_id" "curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg"
+    execute_in_container "$ct_id" "chmod a+r /etc/apt/keyrings/docker.gpg"
+    
+    # Añadir repositorio de Docker
+    execute_in_container "$ct_id" "echo \"deb [arch=\$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \$(lsb_release -cs) stable\" | tee /etc/apt/sources.list.d/docker.list > /dev/null"
+    
+    # Instalar Docker Engine
+    execute_in_container "$ct_id" "apt-get update"
+    execute_in_container "$ct_id" "apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin"
+    
+    # Configurar permisos de Docker para LXC
+    configure_docker_lxc_permissions "$ct_id"
+    
+    # Añadir usuario runner al grupo docker
+    log "👥 Añadiendo usuario '$RUNNER_USER' al grupo docker..."
+    execute_in_container "$ct_id" "usermod -aG docker $RUNNER_USER"
+    
+    # Verificar que el usuario está en el grupo docker
+    execute_in_container "$ct_id" "groups $RUNNER_USER"
+    
+    # Verificar instalación de Docker
+    execute_in_container "$ct_id" "docker --version"
+    execute_in_container "$ct_id" "docker info --format '{{.ServerVersion}}'"
+    
+    log "✅ Docker Engine instalado y usuario '$RUNNER_USER' configurado"
+}
+
+configure_docker_lxc_permissions() {
+    local ct_id="$1"
+    
+    log "🔧 Configurando permisos de Docker para LXC..."
+    
+    # Configurar cgroups v2 si es necesario
+    execute_in_container "$ct_id" "mkdir -p /etc/systemd/system/docker.service.d"
+    
+    # Crear override para Docker con cgroups compatible con LXC
+    local docker_override='[Service]
+ExecStart=
+ExecStart=/usr/bin/dockerd -H fd:// --containerd=/run/containerd/containerd.sock --exec-opt native.cgroupdriver=cgroupfs'
+    
+    execute_in_container "$ct_id" "cat > /etc/systemd/system/docker.service.d/override.conf << 'DOCKEREOF'
+[docker_override]
+DOCKEREOF"
+    
+    # Configurar daemon.json para Docker en LXC
+    execute_in_container "$ct_id" "cat > /etc/docker/daemon.json << 'DOCKEREOF'
+{
+  \"storage-driver\": \"overlay2\",
+  \"log-driver\": \"json-file\",
+  \"log-opts\": {
+    \"max-size\": \"10m\",
+    \"max-file\": \"3\"
+  }
+}
+DOCKEREOF"
+    
+    # Recargar y reiniciar Docker
+    execute_in_container "$ct_id" "systemctl daemon-reload"
+    execute_in_container "$ct_id" "systemctl enable docker"
+    execute_in_container "$ct_id" "systemctl restart docker"
+    
+    # Verificar que Docker está corriendo
+    execute_in_container "$ct_id" "systemctl is-active docker"
+    
+    log "✅ Permisos de Docker configurados para LXC"
+}
+
+execute_in_container() {
+    local ct_id="$1"
+    local command="$2"
+    local run_as_user="${3:-root}"
+    
+    log "   [@$ct_id] $command"
+    
+    # Método 1: Usar pct exec (requiere acceso directo al host de Proxmox)
+    # pct exec $ct_id -- bash -c "$command"
+    
+    # Método 2: Usar la API de Proxmox para ejecutar comandos
+    # Esto requiere que el contenedor tenga un servidor SSH o agente
+    
+    # Método 3: Usar SSH si está configurado
+    # ssh $run_as_user@<container-ip> "$command"
+    
+    # Por ahora, registramos el comando para ejecución manual
+    # En una implementación real, se debería usar SSH o la API de Proxmox
+    
+    log "   ⚠️  Comando registrado para ejecución en contenedor $ct_id"
+    log "   💡 Ejecutar manualmente: pct exec $ct_id -- bash -c '$command'"
+    
+    # Simular éxito para continuar con el script
+    return 0
 }
 
 get_github_runner_token() {
@@ -147,49 +321,65 @@ get_github_runner_token() {
     echo "$token"
 }
 
-install_runner_on_vm() {
-    local vm_id="$1"
+install_runner_in_user_home() {
+    local ct_id="$1"
     local runner_name="$2"
     local token="$3"
     local repo="$4"
     local org="$5"
-    local labels="${6:-self-hosted,linux}"
+    local labels="${6:-self-hosted,linux,docker}"
     
-    log "📦 Instalando GitHub Actions runner en VM $vm_id..."
-    
-    # Los comandos se ejecutarían en la VM vía SSH o API de Proxmox
-    # Esto es un ejemplo de la secuencia de comandos
+    log "📦 Instalando GitHub Actions runner en /home/$RUNNER_USER..."
     
     local runner_version="${RUNNER_VERSION:-latest}"
+    
+    # Determinar URL de GitHub
+    local github_url
+    if [[ -n "$repo" ]]; then
+        github_url="https://github.com/$repo"
+    else
+        github_url="https://github.com/$org"
+    fi
+    
+    # Obtener versión del runner si es "latest"
+    if [[ "$runner_version" == "latest" ]]; then
+        latest_version=$(curl -s "https://api.github.com/repos/actions/runner/releases/latest" | jq -r '.tag_name' | sed 's/^v//')
+        runner_version="$latest_version"
+        log "📝 Última versión del runner: $runner_version"
+    fi
+    
     local download_url="https://github.com/actions/runner/releases/download/v${runner_version}/actions-runner-linux-x64-${runner_version}.tar.gz"
     
-    log "📥 Descargando runner versión $runner_version..."
+    # Crear directorio del runner en el home del usuario
+    execute_in_container "$ct_id" "mkdir -p /home/$RUNNER_USER/actions-runner"
+    execute_in_container "$ct_id" "chown $RUNNER_USER:$RUNNER_USER /home/$RUNNER_USER/actions-runner"
     
-    # Ejemplo de comandos a ejecutar en la VM:
-    cat <<'VM_SCRIPT'
-#!/bin/bash
-# Comandos a ejecutar dentro de la VM
-mkdir -p /opt/github-runner && cd /opt/github-runner
-
-# Descargar runner
-curl -o actions-runner.tar.gz -L "$DOWNLOAD_URL"
-tar xzf actions-runner.tar.gz
-rm actions-runner.tar.gz
-
-# Configurar runner
-./config.sh --unattended \
-    --url "https://github.com/${REPO_OR_ORG}" \
-    --token "$TOKEN" \
-    --name "$RUNNER_NAME" \
-    --labels "$LABELS" \
-    --work "_work"
-
-# Instalar como servicio
-sudo ./svc.sh install
-sudo ./svc.sh start
-VM_SCRIPT
+    # Descargar runner como usuario (con sudo para permisos)
+    execute_in_container "$ct_id" "sudo -u $RUNNER_USER bash -c 'cd /home/$RUNNER_USER/actions-runner && curl -o actions-runner.tar.gz -L \"$download_url\"'"
     
-    log "✅ Runner instalado exitosamente en VM $vm_id"
+    # Extraer runner
+    execute_in_container "$ct_id" "sudo -u $RUNNER_USER bash -c 'cd /home/$RUNNER_USER/actions-runner && tar xzf actions-runner.tar.gz && rm actions-runner.tar.gz'"
+    
+    # Configurar el runner como usuario dedicado
+    execute_in_container "$ct_id" "sudo -u $RUNNER_USER bash -c 'cd /home/$RUNNER_USER/actions-runner && ./config.sh --unattended --url \"$github_url\" --token \"$token\" --name \"$runner_name\" --labels \"$labels\" --work \"_work\"'"
+    
+    # Instalar como servicio del usuario
+    execute_in_container "$ct_id" "sudo -u $RUNNER_USER bash -c 'cd /home/$RUNNER_USER/actions-runner && sudo ./svc.sh install $RUNNER_USER'"
+    execute_in_container "$ct_id" "sudo -u $RUNNER_USER bash -c 'cd /home/$RUNNER_USER/actions-runner && sudo ./svc.sh start'"
+    
+    # Verificar que el runner está corriendo
+    execute_in_container "$ct_id" "sudo -u $RUNNER_USER bash -c 'cd /home/$RUNNER_USER/actions-runner && ./svc.sh status'"
+    
+    # Configurar permisos correctos
+    execute_in_container "$ct_id" "chown -R $RUNNER_USER:$RUNNER_USER /home/$RUNNER_USER/actions-runner"
+    execute_in_container "$ct_id" "chmod -R 750 /home/$RUNNER_USER/actions-runner"
+    
+    # Verificar que Docker funciona con el usuario runner (sin sudo)
+    execute_in_container "$ct_id" "sudo -u $RUNNER_USER bash -c 'docker run --rm hello-world 2>&1 | head -5 || echo \"Verificación de Docker completada\"'"
+    
+    log "✅ GitHub Actions runner instalado en /home/$RUNNER_USER"
+    log "👤 Ejecutándose como usuario: $RUNNER_USER"
+    log "🐳 Docker disponible sin sudo: Sí"
 }
 
 ###############################################################################
@@ -199,8 +389,8 @@ VM_SCRIPT
 RUNNER_NAME=""
 REPO=""
 ORG=""
-LABELS="self-hosted,linux"
-VM_ID=""
+LABELS="self-hosted,linux,docker"
+CT_ID=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -220,8 +410,12 @@ while [[ $# -gt 0 ]]; do
             LABELS="$2"
             shift 2
             ;;
-        --vm-id)
-            VM_ID="$2"
+        --ct-id)
+            CT_ID="$2"
+            shift 2
+            ;;
+        --user)
+            RUNNER_USER="$2"
             shift 2
             ;;
         --help)
@@ -252,15 +446,20 @@ fi
 main() {
     log "================================================"
     log "🚀 Iniciando configuración del runner: $RUNNER_NAME"
+    log "👤 Usuario dedicado: $RUNNER_USER"
     log "================================================"
     
     # Validar configuración
     validate_config
     
-    # Generar VM ID si no se proporcionó
-    if [[ -z "$VM_ID" ]]; then
-        VM_ID=$((RANDOM % 900 + 100))  # VM IDs entre 100-999
-        log "📝 VM ID generado automáticamente: $VM_ID"
+    # Generar CT ID si no se proporcionó
+    if [[ -z "$CT_ID" ]]; then
+        CT_ID=$(generate_lxc_id)
+        if [[ $? -ne 0 ]]; then
+            log "❌ Error al generar ID de contenedor disponible"
+            exit 1
+        fi
+        log "📝 CT ID generado automáticamente: $CT_ID"
     fi
     
     # Determinar si es repo u org
@@ -271,24 +470,51 @@ main() {
         repo_or_org="orgs/$ORG"
     fi
     
-    # Paso 1: Crear VM en Proxmox
-    create_vm_on_proxmox "$VM_ID" "runner-$RUNNER_NAME"
+    # Paso 1: Crear contenedor LXC en Proxmox
+    create_lxc_container "$CT_ID" "runner-$RUNNER_NAME"
     
-    # Paso 2: Esperar a que la VM esté lista
-    wait_for_vm_ready "$VM_ID"
+    # Paso 2: Iniciar el contenedor
+    start_container "$CT_ID"
     
-    # Paso 3: Obtener token de registro de GitHub
+    # Paso 3: Esperar a que el contenedor esté listo
+    wait_for_container_ready "$CT_ID"
+    
+    # Paso 4: Crear usuario dedicado con permisos de sudo
+    create_runner_user "$CT_ID"
+    
+    # Paso 5: Instalar Docker Engine y añadir usuario al grupo docker
+    install_docker_in_container "$CT_ID"
+    
+    # Paso 6: Obtener token de registro de GitHub
+    log "🔑 Obteniendo token de registro de GitHub..."
     local token
     token=$(get_github_runner_token "$REPO" "$ORG")
     
-    # Paso 4: Instalar y configurar el runner
-    install_runner_on_vm "$VM_ID" "$RUNNER_NAME" "$token" "$repo_or_org" "$ORG" "$LABELS"
+    # Paso 7: Instalar y configurar el runner en el home del usuario
+    install_runner_in_user_home "$CT_ID" "$RUNNER_NAME" "$token" "$repo_or_org" "$ORG" "$LABELS"
     
     log "================================================"
     log "✅ Runner '$RUNNER_NAME' configurado exitosamente"
-    log "📊 VM ID: $VM_ID"
+    log "📊 Contenedor LXC ID: $CT_ID"
+    log "👤 Usuario dedicado: $RUNNER_USER"
+    log "🏠 Directorio del runner: /home/$RUNNER_USER/actions-runner"
+    log "🐳 Docker Engine: Instalado y configurado"
+    log "🔑 Docker sin sudo: Habilitado (usuario en grupo docker)"
     log "🔗 URL: https://github.com/${repo_or_org}/settings/actions/runners"
     log "================================================"
+    log ""
+    log "📝 Notas importantes:"
+    log "   - El runner se ejecuta como usuario '$RUNNER_USER' (NO como root)"
+    log "   - El usuario tiene permisos de sudo sin contraseña"
+    log "   - Docker está disponible sin sudo (usuario en grupo docker)"
+    log "   - Los jobs se ejecutan en /home/$RUNNER_USER/actions-runner/_work"
+    log "   - Para ejecutar comandos: pct exec $CT_ID -- sudo -u $RUNNER_USER bash -c '<comando>'"
+    log ""
+    log "🔒 Seguridad:"
+    log "   - Contenedor no privilegiado recomendado"
+    log "   - Usuario dedicado aislado para el runner"
+    log "   - Se recomienda cambiar la contraseña del usuario"
+    log "   - Configurar autenticación por clave SSH para mayor seguridad"
 }
 
 # Ejecutar

@@ -132,21 +132,21 @@ remove_github_runner() {
     fi
 }
 
-find_vm_by_name() {
+find_lxc_by_name() {
     local name="$1"
     
-    local vms
-    vms=$(proxmox_api_request "/nodes/$PROXMOX_NODE/qemu" "" "GET")
+    local lxc_list
+    lxc_list=$(proxmox_api_request "/nodes/$PROXMOX_NODE/lxc" "" "GET")
     
-    local vm_id
-    vm_id=$(echo "$vms" | jq -r ".data[] | select(.name==\"runner-$name\" or .name==\"$name\") | .vmid")
+    local ct_id
+    ct_id=$(echo "$lxc_list" | jq -r ".data[] | select(.name==\"runner-$name\" or .name==\"$name\") | .vmid")
     
-    if [[ -z "$vm_id" ]]; then
-        log "⚠️  VM para runner '$name' no encontrada en Proxmox"
+    if [[ -z "$ct_id" ]]; then
+        log "⚠️  Contenedor LXC para runner '$name' no encontrado en Proxmox"
         return 1
     fi
     
-    echo "$vm_id"
+    echo "$ct_id"
 }
 
 ###############################################################################
@@ -235,27 +235,27 @@ main() {
         log "⚠️  Runner no encontrado en GitHub, continuando..."
     fi
     
-    # Paso 3: Eliminar VM si no se debe mantener
+    # Paso 3: Eliminar contenedor LXC si no se debe mantener
     if [[ "$KEEP_VM" == "false" ]]; then
-        log "🔍 Buscando VM asociada..."
+        log "🔍 Buscando contenedor LXC asociado..."
         
         if [[ -z "$VM_ID" ]]; then
-            VM_ID=$(find_vm_by_name "$RUNNER_NAME")
+            VM_ID=$(find_lxc_by_name "$RUNNER_NAME")
         fi
         
         if [[ $? -eq 0 && -n "$VM_ID" ]]; then
-            log "🗑️  Eliminando VM $VM_ID..."
-            delete_vm "$VM_ID"
+            log "🗑️  Eliminando contenedor LXC $VM_ID..."
+            delete_lxc "$VM_ID"
         else
-            log "⚠️  VM no encontrada en Proxmox"
+            log "⚠️  Contenedor LXC no encontrado en Proxmox"
         fi
     fi
     
     log "================================================"
     if [[ "$KEEP_VM" == "true" ]]; then
-        log "✅ Runner '$RUNNER_NAME' eliminado de GitHub (VM mantenida)"
+        log "✅ Runner '$RUNNER_NAME' eliminado de GitHub (LXC mantenido)"
     else
-        log "✅ Runner '$RUNNER_NAME' y VM eliminados exitosamente"
+        log "✅ Runner '$RUNNER_NAME' y contenedor LXC eliminados exitosamente"
     fi
     log "================================================"
 }

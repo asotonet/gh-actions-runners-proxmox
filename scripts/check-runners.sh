@@ -167,27 +167,27 @@ display_runners_json() {
     echo "$runners_json" | jq '.'
 }
 
-check_vms_status() {
+check_lxc_status() {
     echo ""
     echo "================================================"
-    echo "🖥️  Estado de VMs en Proxmox"
+    echo "📦 Estado de Contenedores LXC"
     echo "================================================"
     
-    local vms
-    vms=$(proxmox_api_request "/nodes/$PROXMOX_NODE/qemu" "" "GET")
+    local lxc_list
+    lxc_list=$(proxmox_api_request "/nodes/$PROXMOX_NODE/lxc" "" "GET")
     
-    local runner_vms
-    runner_vms=$(echo "$vms" | jq -r '.data[] | select(.name | test("runner")) | "\(.vmid) | \(.name) | \(.status) | \(.maxmem // 0) | \(.maxdisk // 0)"')
+    local runner_lxc
+    runner_lxc=$(echo "$lxc_list" | jq -r '.data[] | select(.name | test("runner")) | "\(.vmid) | \(.name) | \(.status) | \(.mem // 0) | \(.maxmem // 0) | \(.disk // 0) | \(.maxdisk // 0)"')
     
-    if [[ -z "$runner_vms" ]]; then
-        echo "📝 No hay VMs de runners encontradas"
+    if [[ -z "$runner_lxc" ]]; then
+        echo "📝 No hay contenedores LXC de runners encontrados"
         return 0
     fi
     
-    printf "%-10s | %-25s | %-10s | %-15s | %-15s\n" "VM ID" "Nombre" "Estado" "Memoria" "Disco"
-    printf "%-10s-+-%-25s-+-%-10s-+-%-15s-+-%-15s\n" "----------" "-------------------------" "----------" "---------------" "---------------"
+    printf "%-10s | %-25s | %-10s | %-15s | %-15s | %-15s\n" "CT ID" "Nombre" "Estado" "Memoria Usada" "Memoria Total" "Disco"
+    printf "%-10s-+-%-25s-+-%-10s-+-%-15s-+-%-15s-+-%-15s\n" "----------" "-------------------------" "----------" "---------------" "---------------" "---------------"
     
-    echo "$runner_vms" | while IFS='|' read -r vmid name status mem disk; do
+    echo "$runner_lxc" | while IFS='|' read -r ctid name status mem maxmem disk maxdisk; do
         local status_icon
         if [[ "$status" == "running" ]]; then
             status_icon="🟢"
@@ -196,13 +196,16 @@ check_vms_status() {
         fi
         
         local mem_mb=$((mem / 1024 / 1024))
+        local maxmem_mb=$((maxmem / 1024 / 1024))
         local disk_gb=$((disk / 1024 / 1024 / 1024))
+        local maxdisk_gb=$((maxdisk / 1024 / 1024 / 1024))
         
-        printf "%-10s | %-25s | ${status_icon} %-8s | %-14sMB | %-14sGB\n" \
-            "$(echo "$vmid" | xargs)" \
+        printf "%-10s | %-25s | ${status_icon} %-8s | %-14sMB | %-14sMB | %-14sGB\n" \
+            "$(echo "$ctid" | xargs)" \
             "$(echo "$name" | xargs)" \
             "$(echo "$status" | xargs)" \
             "$mem_mb" \
+            "$maxmem_mb" \
             "$disk_gb"
     done
     
@@ -295,7 +298,7 @@ main() {
         display_runners_json "$runners"
     else
         display_runners_table "$runners" "$DETAILED"
-        check_vms_status
+        check_lxc_status
     fi
     
     log "✅ Verificación completada"

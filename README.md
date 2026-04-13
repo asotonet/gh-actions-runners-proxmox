@@ -1,12 +1,15 @@
-# GitHub Actions Runners en Proxmox
+# GitHub Actions Runners en Proxmox (LXC)
 
-Automatización para el despliegue y gestión de GitHub Actions runners auto-hospedados en máquinas virtuales de Proxmox.
+Automatización para el despliegue y gestión de GitHub Actions runners auto-hospedados en contenedores LXC de Proxmox con Docker Engine.
 
 ## 📋 Descripción
 
-Este proyecto proporciona scripts para automatizar la creación, configuración y gestión de runners de GitHub Actions en un entorno Proxmox VE. Permite:
+Este proyecto proporciona scripts para automatizar la creación, configuración y gestión de runners de GitHub Actions en contenedores LXC en un entorno Proxmox VE. Cada contenedor incluye Docker Engine preinstalado y configurado con los permisos de kernel necesarios.
 
-- Crear y configurar runners auto-hospedados automáticamente
+Características principales:
+- Crear y configurar contenedores LXC con runners automáticamente
+- Instalar y configurar Docker Engine en cada contenedor
+- Configurar permisos de kernel para Docker (cgroups, AppArmor, etc.)
 - Gestionar el ciclo de vida de los runners
 - Configurar runners para repositorios u organizaciones
 - Monitorizar el estado de los runners
@@ -19,6 +22,8 @@ Este proyecto proporciona scripts para automatizar la creación, configuración 
 - **Token de GitHub** con permisos para registrar runners
 - **jq** para procesamiento de JSON
 - **curl** para peticiones HTTP
+- **Template LXC** con soporte para contenedores no privilegiados (recomendado)
+- **Permisos de nestificación** para Docker en LXC (cgroups v2)
 
 ## 📁 Estructura del Proyecto
 
@@ -89,8 +94,15 @@ Crear un archivo `config/config.env` basado en `config/config.example.env`:
 | `PROXMOX_NODE` | Nodo de Proxmox | `pve` |
 | `GITHUB_TOKEN` | Token de GitHub | `ghp_xxxxx` |
 | `RUNNER_VERSION` | Versión del runner | `2.311.0` |
-| `VM_TEMPLATE` | ID del template VM | `9000` |
-| `VM_STORAGE` | Almacenamiento para VMs | `local-lvm` |
+| `LXC_TEMPLATE` | ID del template LXC | `ubuntu-22.04-standard` |
+| `LXC_STORAGE` | Almacenamiento para LXC | `local-lvm` |
+| `LXC_MEMORY` | Memoria RAM para LXC (MB) | `4096` |
+| `LXC_CPUS` | Número de CPUs | `2` |
+| `LXC_DISK` | Tamaño de disco (GB) | `30` |
+| `LXC_UNPRIVILEGED` | Contenedor no privilegiado | `1` (recomendado) |
+| `LXC_NESTING` | Habilitar nestificación | `1` (requerido para Docker) |
+| `LXC_KEYCTL` | Habilitar keyctl | `1` (requerido para Docker) |
+| `DOCKER_VERSION` | Versión de Docker | `24.0.7` |
 
 ## 🔒 Seguridad
 
@@ -105,6 +117,26 @@ Los logs se guardan en el directorio `logs/` con el formato:
 - `setup-runner-YYYY-MM-DD.log`
 - `remove-runner-YYYY-MM-DD.log`
 - `check-runners-YYYY-MM-DD.log`
+- `docker-install-YYYY-MM-DD.log`
+
+## 🐳 Configuración de Docker en LXC
+
+Para que Docker funcione correctamente en contenedores LXC, se requieren las siguientes configuraciones:
+
+### Características del contenedor:
+- **Nesting**: Habilitado (permite ejecutar Docker dentro de LXC)
+- **Keyctl**: Habilitado (requerido para Docker)
+- **cgroups v2**: Soporte habilitado
+- **AppArmor**: Perfil sin restricciones para Docker
+
+### Script de instalación de Docker:
+El script `setup-runner.sh` incluye automáticamente:
+1. Instalación de dependencias necesarias
+2. Configuración del repositorio oficial de Docker
+3. Instalación de Docker Engine
+4. Configuración de permisos y cgroups
+5. Habilitación del servicio de Docker
+6. Verificación de la instalación
 
 ## 🤝 Contribuir
 
