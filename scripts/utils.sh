@@ -208,7 +208,7 @@ generate_lxc_id() {
     # Buscar ID disponible
     for id in $(seq "$start_id" "$end_id"); do
         if ! echo "$used_ids" | grep -qw "^${id}$"; then
-            log "📋 IDs usados encontrados: $(echo $used_ids | tr '\n' ', ' | sed 's/,$//')"
+            log "📋 IDs usados encontrados: $(echo $used_ids | tr '\n' ', ' | sed 's/,$//')" >&2
             echo "$id"
             return 0
         fi
@@ -345,11 +345,16 @@ generate_vm_id() {
     
     # Extraer IDs existentes
     local used_ids
-    used_ids=$(echo "$existing_vms" | jq -r '.data[].vmid // empty' 2>/dev/null)
+    if command -v jq >/dev/null 2>&1; then
+        used_ids=$(echo "$existing_vms" | jq -r '.data[].vmid // empty' 2>/dev/null)
+    else
+        used_ids=$(echo "$existing_vms" | grep -o '"vmid":[0-9]*' | cut -d: -f2 | sort -n)
+    fi
     
     # Buscar ID disponible
     for id in $(seq "$start_id" "$end_id"); do
-        if ! echo "$used_ids" | grep -q "^${id}$"; then
+        if ! echo "$used_ids" | grep -qw "^${id}$"; then
+            log "📋 IDs usados encontrados: $(echo $used_ids | tr '\n' ', ' | sed 's/,$//')" >&2
             echo "$id"
             return 0
         fi
