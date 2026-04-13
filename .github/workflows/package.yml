@@ -22,11 +22,16 @@ jobs:
         run: |
           VERSION=${GITHUB_REF_NAME:-$(date +%Y%m%d%H%M%S)}
           PACKAGE_NAME="gh-actions-runners-proxmox-${VERSION}.tar.gz"
-          tar -czf "$PACKAGE_NAME" \
-            --exclude='.git' \
-            --exclude='logs' \
-            --exclude='config/config.env' \
-            .
+          
+          # Crear lista de archivos excluyendo directorios innecesarios
+          # Usar un subdirectorio evita el error "file changed as we read it"
+          mkdir -p package-build
+          rsync -a --exclude='.git' --exclude='logs' --exclude='config/config.env' --exclude='package-build' ./ package-build/
+          
+          # Crear tarball desde el subdirectorio
+          tar -czf "$PACKAGE_NAME" -C package-build .
+          rm -rf package-build
+          
           echo "PACKAGE_NAME=$PACKAGE_NAME" >> $GITHUB_ENV
 
       - name: Subir artefacto
