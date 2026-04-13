@@ -7,6 +7,8 @@ logs/
 
 # Archivos de Markdown (archivos ya commiteados se mantienen)
 *.md
+!README.md
+!QUICKSTART.md
 
 # Archivos temporales
 *.tmp
