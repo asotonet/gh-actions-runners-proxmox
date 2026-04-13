@@ -77,11 +77,27 @@ install_dependencies() {
                     ;;
                 jq)
                     echo "   📥 Instalando jq..."
-                    pacman -S --noconfirm jq 2>/dev/null || echo "   ❌ Falló pacman - Instala manualmente: winget install jqlang.jq"
+                    # Intentar con winget primero
+                    if command -v winget >/dev/null 2>&1; then
+                        winget install -e --id jqlang.jq --accept-package-agreements --accept-source-agreements 2>/dev/null && echo "   ✅ jq instalado con winget" || echo "   ⚠️  winget falló - instala manualmente: https://github.com/jqlang/jq/releases"
+                    elif command -v pacman >/dev/null 2>&1; then
+                        pacman -S --noconfirm jq 2>/dev/null || echo "   ❌ Falló pacman"
+                    else
+                        echo "   💡 Descargando jq binario..."
+                        local jq_url="https://github.com/jqlang/jq/releases/download/jq-1.7.1/jq-win64.exe"
+                        curl -L "$jq_url" -o /usr/bin/jq.exe 2>/dev/null && chmod +x /usr/bin/jq.exe && echo "   ✅ jq descargado" || echo "   ❌ Falló descarga"
+                    fi
                     ;;
                 sshpass)
                     echo "   📥 Instalando sshpass..."
-                    pacman -S --noconfirm sshpass 2>/dev/null || echo "   ❌ Falló pacman - Instala manualmente: pacman -S sshpass"
+                    if command -v pacman >/dev/null 2>&1; then
+                        pacman -S --noconfirm sshpass 2>/dev/null || echo "   ❌ Falló pacman"
+                    else
+                        echo "   💡 sshpass no disponible en Windows sin MSYS2"
+                        echo "   💡 Alternativa: Genera una clave SSH y úsala en Proxmox"
+                        echo "   💡 Ejecuta: ssh-keygen -t ed25519"
+                        echo "   💡 Luego copia la clave pública a Proxmox: ssh-copy-id root@PROXMOX_HOST"
+                    fi
                     ;;
             esac
         done
@@ -92,7 +108,7 @@ install_dependencies() {
         echo "📦 Instalando dependencias..."
         
         if command -v apt-get >/dev/null 2>&1; then
-            sudo apt-get update -qq
+            sudo apt-get update -qq 2>/dev/null
             for dep in "${missing[@]}"; do
                 echo "   📥 Instalando $dep..."
                 sudo apt-get install -y -qq "$dep" 2>/dev/null || echo "   ❌ Falló apt-get install $dep"
