@@ -516,21 +516,6 @@ validate_repo_format() {
     return 0
 }
 
-# Validar que existen las herramientas necesarias
-check_dependencies() {
-    local deps=("curl" "jq")
-    
-    for dep in "${deps[@]}"; do
-        if ! command -v "$dep" &>/dev/null; then
-            log_error "Dependencia no encontrada: $dep"
-            log_error "Instalar con: apt install $dep"
-            return 1
-        fi
-    done
-    
-    return 0
-}
-
 # ==============================================================================
 # Funciones de utilidad general
 # ==============================================================================
