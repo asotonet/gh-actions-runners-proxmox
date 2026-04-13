@@ -188,6 +188,51 @@ Docker se configura con:
 }
 ```
 
+### 🔐 Docker Login y Registros
+
+El runner se configura con un archivo `config.json` vacío en `/home/runner/.docker/config.json`. Para hacer **docker login** en tus pipelines, usa **GitHub Secrets**:
+
+#### Secrets necesarios en GitHub:
+| Secret | Descripción | Ejemplo |
+|--------|-------------|---------|
+| `DOCKER_USERNAME` | Usuario del registry | `miusuario` |
+| `DOCKER_PASSWORD` | Password o token de acceso | `ghp_xxxxx` o token |
+| `DOCKER_REGISTRY_URL` | URL del registry (opcional) | `docker.io`, `ghcr.io` |
+
+#### Ejemplo de uso en workflow:
+```yaml
+- name: Login to Docker Hub
+  uses: docker/login-action@v3
+  with:
+    username: ${{ secrets.DOCKER_USERNAME }}
+    password: ${{ secrets.DOCKER_PASSWORD }}
+
+# O con Docker CLI directamente:
+- name: Login and Push
+  run: |
+    echo "${{ secrets.DOCKER_PASSWORD }}" | docker login -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
+    docker build -t mi-imagen:latest .
+    docker push mi-imagen:latest
+```
+
+### ⚙️ Configuración de LXC para Docker
+
+**IMPORTANTE**: Para que Docker funcione dentro de un contenedor LXC, se requieren estas configuraciones en `/etc/pve/lxc/<ct_id>.conf`:
+
+```
+lxc.apparmor.profile: unconfined
+lxc.cap.drop:
+lxc.cgroup2.devices.allow: a
+lxc.mount.entry: /dev/fuse dev/fuse none bind,create=file,optional 0 0
+```
+
+El script `setup-runner.sh` intenta aplicar estas configuraciones automáticamente si detecta acceso al host de Proxmox. Si no es posible, las muestra para que las apliques manualmente.
+
+**Reiniciar el contenedor** después de aplicar las configuraciones:
+```bash
+pct shutdown <ct_id> && pct start <ct_id>
+```
+
 ## 🤝 Contribuir
 
 1. Fork el proyecto

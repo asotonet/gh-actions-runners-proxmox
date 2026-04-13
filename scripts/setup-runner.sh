@@ -113,8 +113,96 @@ create_lxc_container() {
         return 1
     fi
     
+    # IMPORTANTE: Configurar AppArmor y capacidades para Docker
+    # Sin esto, Docker NO funcionará dentro del contenedor LXC
+    log "🔒 Configurando AppArmor y capacidades para Docker..."
+    
+    # Modificar el archivo de configuración del contenedor directamente
+    # Esto requiere acceso al host de Proxmox via SSH o ejecución remota
+    configure_lxc_for_docker "$ct_id"
+    
     log "✅ Contenedor LXC creado exitosamente con ID: $ct_id"
     echo "$ct_id"
+}
+
+configure_lxc_for_docker() {
+    local ct_id="$1"
+    
+    log "⚙️  Configurando contenedor LXC $ct_id para soportar Docker..."
+    
+    # Estas configuraciones se deben aplicar en el archivo /etc/pve/lxc/${ct_id}.conf
+    # del host de Proxmox
+    
+    # Configuraciones REQUERIDAS para Docker en LXC:
+    # 1. lxc.apparmor.profile: unconfined
+    #    - Deshabilita AppArmor para permitir que Docker gestione la seguridad
+    #    - Sin esto, Docker no puede crear contenedores correctamente
+    
+    # 2. lxc.cap.drop:
+    #    - Elimina la lista de capacidades eliminadas
+    #    - Permite que Docker use todas las capacidades necesarias
+    
+    # 3. lxc.cgroup2.devices.allow: (opcional pero recomendado)
+    #    - Permite acceso a dispositivos necesarios para Docker
+    
+    log "📝 Configuraciones requeridas para Docker en LXC:"
+    log "   Agregar a /etc/pve/lxc/${ct_id}.conf:"
+    log ""
+    log "   lxc.apparmor.profile: unconfined"
+    log "   lxc.cap.drop:"
+    log ""
+    log "   # Opcional pero recomendado:"
+    log "   lxc.cgroup2.devices.allow: a"
+    log "   lxc.mount.entry: /dev/fuse dev/fuse none bind,create=file,optional 0 0"
+    log ""
+    
+    # Intentar configurar via SSH si hay acceso al host
+    # Esto requiere que el script se ejecute desde el host de Proxmox
+    # o tenga acceso SSH configurado
+    
+    if command -v pct >/dev/null 2>&1; then
+        log "🔧 Aplicando configuraciones via pct..."
+        
+        # Las configuraciones se aplican editando el archivo directamente
+        local conf_file="/etc/pve/lxc/${ct_id}.conf"
+        
+        # Backup del archivo original
+        cp "$conf_file" "${conf_file}.bak.$(date +%Y%m%d%H%M%S)" 2>/dev/null || true
+        
+        # Agregar configuraciones si no existen
+        if ! grep -q "lxc.apparmor.profile" "$conf_file" 2>/dev/null; then
+            echo "lxc.apparmor.profile: unconfined" >> "$conf_file"
+            log "✅ lxc.apparmor.profile: unconfined - Aplicado"
+        fi
+        
+        if ! grep -q "lxc.cap.drop" "$conf_file" 2>/dev/null; then
+            echo "lxc.cap.drop:" >> "$conf_file"
+            log "✅ lxc.cap.drop: - Aplicado"
+        fi
+        
+        if ! grep -q "lxc.cgroup2.devices.allow" "$conf_file" 2>/dev/null; then
+            echo "lxc.cgroup2.devices.allow: a" >> "$conf_file"
+            log "✅ lxc.cgroup2.devices.allow: a - Aplicado"
+        fi
+        
+        if ! grep -q "lxc.mount.entry: /dev/fuse" "$conf_file" 2>/dev/null; then
+            echo "lxc.mount.entry: /dev/fuse dev/fuse none bind,create=file,optional 0 0" >> "$conf_file"
+            log "✅ lxc.mount.entry: /dev/fuse - Aplicado"
+        fi
+        
+        log "✅ Configuraciones de Docker aplicadas al contenedor $ct_id"
+        log "⚠️  IMPORTANTE: Reiniciar el contenedor para aplicar cambios"
+    else
+        log "⚠️  No se detectó acceso directo al host de Proxmox"
+        log "💡 Aplica manualmente estas configuraciones en /etc/pve/lxc/${ct_id}.conf:"
+        log ""
+        log "   lxc.apparmor.profile: unconfined"
+        log "   lxc.cap.drop:"
+        log "   lxc.cgroup2.devices.allow: a"
+        log "   lxc.mount.entry: /dev/fuse dev/fuse none bind,create=file,optional 0 0"
+        log ""
+        log "   Luego reinicia el contenedor: pct shutdown ${ct_id} && pct start ${ct_id}"
+    fi
 }
 
 wait_for_container_ready() {
@@ -188,9 +276,31 @@ install_docker_in_container() {
     
     log "🐳 Instalando Docker Engine en el contenedor $ct_id..."
     
-    # Actualizar sistema e instalar dependencias
+    # Actualizar sistema e instalar dependencias básicas
     execute_in_container "$ct_id" "apt-get update"
-    execute_in_container "$ct_id" "apt-get install -y ca-certificates curl gnupg lsb-release"
+    
+    # Instalar paquetes esenciales para CI/CD y Docker builds
+    # IMPORTANTE: Muchos pipelines necesitan herramientas adicionales
+    execute_in_container "$ct_id" "apt-get install -y \
+        ca-certificates \
+        curl \
+        gnupg \
+        lsb-release \
+        git \
+        wget \
+        jq \
+        make \
+        build-essential \
+        pkg-config \
+        libssl-dev \
+        python3 \
+        python3-pip \
+        openssh-client \
+        rsync \
+        unzip \
+        zip \
+        tar \
+        gzip"
     
     # Crear directorio para llaves GPG
     execute_in_container "$ct_id" "install -m 0755 -d /etc/apt/keyrings"
@@ -202,9 +312,15 @@ install_docker_in_container() {
     # Añadir repositorio de Docker
     execute_in_container "$ct_id" "echo \"deb [arch=\$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \$(lsb_release -cs) stable\" | tee /etc/apt/sources.list.d/docker.list > /dev/null"
     
-    # Instalar Docker Engine
+    # Instalar Docker Engine y plugins
     execute_in_container "$ct_id" "apt-get update"
-    execute_in_container "$ct_id" "apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin"
+    execute_in_container "$ct_id" "apt-get install -y \
+        docker-ce \
+        docker-ce-cli \
+        containerd.io \
+        docker-buildx-plugin \
+        docker-compose-plugin \
+        docker-ce-rootless-extras"
     
     # Configurar permisos de Docker para LXC
     configure_docker_lxc_permissions "$ct_id"
@@ -218,9 +334,12 @@ install_docker_in_container() {
     
     # Verificar instalación de Docker
     execute_in_container "$ct_id" "docker --version"
+    execute_in_container "$ct_id" "docker compose version"
+    execute_in_container "$ct_id" "docker buildx version"
     execute_in_container "$ct_id" "docker info --format '{{.ServerVersion}}'"
     
     log "✅ Docker Engine instalado y usuario '$RUNNER_USER' configurado"
+    log "📦 Paquetes adicionales instalados: git, make, build-essential, python3, jq, etc."
 }
 
 configure_docker_lxc_permissions() {
