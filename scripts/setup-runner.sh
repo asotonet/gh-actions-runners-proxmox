@@ -123,81 +123,41 @@ create_lxc_container() {
 
 configure_lxc_for_docker() {
     local ct_id="$1"
-    
+
     log "⚙️  Configurando contenedor LXC $ct_id para soportar Docker..."
-    
-    # Estas configuraciones se deben aplicar en el archivo /etc/pve/lxc/${ct_id}.conf
-    # del host de Proxmox
-    
-    # Configuraciones REQUERIDAS para Docker en LXC:
-    # 1. lxc.apparmor.profile: unconfined
-    #    - Deshabilita AppArmor para permitir que Docker gestione la seguridad
-    #    - Sin esto, Docker no puede crear contenedores correctamente
-    
-    # 2. lxc.cap.drop:
-    #    - Elimina la lista de capacidades eliminadas
-    #    - Permite que Docker use todas las capacidades necesarias
-    
-    # 3. lxc.cgroup2.devices.allow: (opcional pero recomendado)
-    #    - Permite acceso a dispositivos necesarios para Docker
-    
-    log "📝 Configuraciones requeridas para Docker en LXC:"
-    log "   Agregar a /etc/pve/lxc/${ct_id}.conf:"
-    log ""
-    log "   lxc.apparmor.profile: unconfined"
-    log "   lxc.cap.drop:"
-    log ""
-    log "   # Opcional pero recomendado:"
-    log "   lxc.cgroup2.devices.allow: a"
-    log "   lxc.mount.entry: /dev/fuse dev/fuse none bind,create=file,optional 0 0"
-    log ""
-    
-    # Intentar configurar via SSH si hay acceso al host
-    # Esto requiere que el script se ejecute desde el host de Proxmox
-    # o tenga acceso SSH configurado
-    
-    if command -v pct >/dev/null 2>&1; then
-        log "🔧 Aplicando configuraciones via pct..."
-        
-        # Las configuraciones se aplican editando el archivo directamente
-        local conf_file="/etc/pve/lxc/${ct_id}.conf"
-        
-        # Backup del archivo original
-        cp "$conf_file" "${conf_file}.bak.$(date +%Y%m%d%H%M%S)" 2>/dev/null || true
-        
-        # Agregar configuraciones si no existen
-        if ! grep -q "lxc.apparmor.profile" "$conf_file" 2>/dev/null; then
-            echo "lxc.apparmor.profile: unconfined" >> "$conf_file"
-            log "✅ lxc.apparmor.profile: unconfined - Aplicado"
-        fi
-        
-        if ! grep -q "lxc.cap.drop" "$conf_file" 2>/dev/null; then
-            echo "lxc.cap.drop:" >> "$conf_file"
-            log "✅ lxc.cap.drop: - Aplicado"
-        fi
-        
-        if ! grep -q "lxc.cgroup2.devices.allow" "$conf_file" 2>/dev/null; then
-            echo "lxc.cgroup2.devices.allow: a" >> "$conf_file"
-            log "✅ lxc.cgroup2.devices.allow: a - Aplicado"
-        fi
-        
-        if ! grep -q "lxc.mount.entry: /dev/fuse" "$conf_file" 2>/dev/null; then
-            echo "lxc.mount.entry: /dev/fuse dev/fuse none bind,create=file,optional 0 0" >> "$conf_file"
-            log "✅ lxc.mount.entry: /dev/fuse - Aplicado"
-        fi
-        
-        log "✅ Configuraciones de Docker aplicadas al contenedor $ct_id"
-        log "⚠️  IMPORTANTE: Reiniciar el contenedor para aplicar cambios"
+
+    # Usar la API de Proxmox para configurar el contenedor
+    # PUT /api2/json/nodes/{node}/lxc/{vmid}/config
+
+    local config_params="hookscript=&"
+    config_params+="features=nesting=1,keyctl=1&"
+    config_params+="lxc.apparmor.profile=unconfined&"
+    config_params+="lxc.cap.drop=&"
+    config_params+="lxc.cgroup2.devices.allow=a"
+
+    log "🔧 Aplicando configuraciones via API de Proxmox..."
+
+    local response
+    response=$(proxmox_api_request "/nodes/$PROXMOX_NODE/lxc/$ct_id/config" "$config_params" "PUT")
+
+    if echo "$response" | grep -qi '"data"'; then
+        log "✅ lxc.apparmor.profile: unconfined - Aplicado"
+        log "✅ lxc.cap.drop: - Aplicado"
+        log "✅ lxc.cgroup2.devices.allow: a - Aplicado"
+        log "✅ features: nesting=1,keyctl=1 - Aplicado"
+        log ""
+        log "⚠️  IMPORTANTE: Reiniciar el contenedor para aplicar cambios:"
+        log "   pct shutdown $ct_id && pct start $ct_id"
     else
-        log "⚠️  No se detectó acceso directo al host de Proxmox"
-        log "💡 Aplica manualmente estas configuraciones en /etc/pve/lxc/${ct_id}.conf:"
+        log "⚠️  No se pudo aplicar configuración via API"
+        log "💡 Aplica manualmente en /etc/pve/lxc/${ct_id}.conf:"
         log ""
         log "   lxc.apparmor.profile: unconfined"
         log "   lxc.cap.drop:"
         log "   lxc.cgroup2.devices.allow: a"
         log "   lxc.mount.entry: /dev/fuse dev/fuse none bind,create=file,optional 0 0"
         log ""
-        log "   Luego reinicia el contenedor: pct shutdown ${ct_id} && pct start ${ct_id}"
+        log "   Luego reinicia: pct shutdown ${ct_id} && pct start ${ct_id}"
     fi
 }
 
