@@ -25,8 +25,125 @@ source "$CONFIG_FILE"
 # Cargar funciones auxiliares
 source "$SCRIPT_DIR/utils.sh"
 
-# Verificar dependencias al inicio
-check_dependencies || exit 1
+# Detectar sistema operativo
+detect_os() {
+    local os_type
+    os_type=$(uname -s)
+    
+    case "$os_type" in
+        MINGW*|MSYS*|CYGWIN*)
+            echo "windows"
+            ;;
+        Linux*)
+            echo "linux"
+            ;;
+        Darwin*)
+            echo "macos"
+            ;;
+        *)
+            echo "unknown"
+            ;;
+    esac
+}
+
+DETECTED_OS=$(detect_os)
+
+# Instalar dependencias automáticamente
+install_dependencies() {
+    local missing=()
+    
+    # Verificar qué falta
+    command -v curl >/dev/null 2>&1 || missing+=("curl")
+    command -v jq >/dev/null 2>&1 || missing+=("jq")
+    command -v sshpass >/dev/null 2>&1 || missing+=("sshpass")
+    
+    if [[ ${#missing[@]} -eq 0 ]]; then
+        echo "✅ Todas las dependencias están instaladas"
+        return 0
+    fi
+    
+    echo "📦 Dependencias faltantes: ${missing[*]}"
+    echo ""
+    
+    if [[ "$DETECTED_OS" == "windows" ]]; then
+        echo "🔧 Sistema detectado: Windows (Git Bash/MSYS2)"
+        echo ""
+        echo "📦 Instalando dependencias..."
+        
+        for dep in "${missing[@]}"; do
+            case "$dep" in
+                curl)
+                    echo "   ✅ curl ya está instalado (incluido con Git Bash)"
+                    ;;
+                jq)
+                    echo "   📥 Instalando jq..."
+                    pacman -S --noconfirm jq 2>/dev/null || echo "   ❌ Falló pacman - Instala manualmente: winget install jqlang.jq"
+                    ;;
+                sshpass)
+                    echo "   📥 Instalando sshpass..."
+                    pacman -S --noconfirm sshpass 2>/dev/null || echo "   ❌ Falló pacman - Instala manualmente: pacman -S sshpass"
+                    ;;
+            esac
+        done
+        
+    elif [[ "$DETECTED_OS" == "linux" ]]; then
+        echo "🔧 Sistema detectado: Linux"
+        echo ""
+        echo "📦 Instalando dependencias..."
+        
+        if command -v apt-get >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            for dep in "${missing[@]}"; do
+                echo "   📥 Instalando $dep..."
+                sudo apt-get install -y -qq "$dep" 2>/dev/null || echo "   ❌ Falló apt-get install $dep"
+            done
+        elif command -v yum >/dev/null 2>&1; then
+            for dep in "${missing[@]}"; do
+                echo "   📥 Instalando $dep..."
+                sudo yum install -y -q "$dep" 2>/dev/null || echo "   ❌ Falló yum install $dep"
+            done
+        elif command -v dnf >/dev/null 2>&1; then
+            for dep in "${missing[@]}"; do
+                echo "   📥 Instalando $dep..."
+                sudo dnf install -y -q "$dep" 2>/dev/null || echo "   ❌ Falló dnf install $dep"
+            done
+        else
+            echo "❌ No se detectó un gestor de paquetes soportado"
+            return 1
+        fi
+        
+    elif [[ "$DETECTED_OS" == "macos" ]]; then
+        echo "🔧 Sistema detectado: macOS"
+        echo ""
+        
+        if ! command -v brew >/dev/null 2>&1; then
+            echo "❌ Homebrew no está instalado"
+            echo "   Instala desde: https://brew.sh"
+            return 1
+        fi
+        
+        echo "📦 Instalando dependencias..."
+        for dep in "${missing[@]}"; do
+            echo "   📥 Instalando $dep..."
+            brew install "$dep" 2>/dev/null || echo "   ❌ Falló brew install $dep"
+        done
+    else
+        echo "❌ Sistema no soportado: $DETECTED_OS"
+        echo ""
+        echo "Instala manualmente:"
+        echo "   curl: https://curl.se"
+        echo "   jq: https://jqlang.github.io/jq/download/"
+        echo "   sshpass: https://sourceforge.net/projects/sshpass/"
+        return 1
+    fi
+    
+    echo ""
+    echo "✅ Instalación completada"
+    return 0
+}
+
+# Verificar dependencias e instalar si faltan
+check_dependencies || install_dependencies
 
 # Configurar logging
 LOG_FILE="$ROOT_DIR/logs/setup-runner-$(date +%Y-%m-%d).log"
