@@ -25,6 +25,9 @@ source "$CONFIG_FILE"
 # Cargar funciones auxiliares
 source "$SCRIPT_DIR/utils.sh"
 
+# Verificar dependencias al inicio
+check_dependencies || exit 1
+
 # Configurar logging
 LOG_FILE="$ROOT_DIR/logs/setup-runner-$(date +%Y-%m-%d).log"
 mkdir -p "$ROOT_DIR/logs"

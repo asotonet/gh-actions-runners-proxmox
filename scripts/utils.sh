@@ -8,6 +8,49 @@
 # Funciones de logging
 # ==============================================================================
 
+# Función helper: parsear JSON con jq o fallback a grep/sed
+parse_json() {
+    local json="$1"
+    local jq_expr="$2"
+    
+    if command -v jq >/dev/null 2>&1; then
+        echo "$json" | jq -r "$jq_expr" 2>/dev/null
+    else
+        # Fallback básico para extracciones simples
+        echo "$json" | grep -o '"[^"]*":[^,}]*' | head -1 | cut -d: -f2- | tr -d '"'
+    fi
+}
+
+# Verificar dependencias necesarias
+check_dependencies() {
+    local missing=()
+    
+    if ! command -v curl >/dev/null 2>&1; then
+        missing+=("curl")
+    fi
+    
+    if ! command -v jq >/dev/null 2>&1; then
+        missing+=("jq")
+    fi
+    
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        echo "❌ Dependencias faltantes: ${missing[*]}"
+        echo ""
+        echo "📦 Instalar en Windows (Git Bash):"
+        echo "   winget install jqlang.jq"
+        echo "   winget install Git.Git"
+        echo ""
+        echo "📦 Instalar en WSL/Ubuntu:"
+        echo "   sudo apt install jq curl"
+        echo ""
+        echo "📦 Instalar en macOS:"
+        echo "   brew install jq curl"
+        return 1
+    fi
+    
+    return 0
+}
+
 log_debug() {
     if [[ "${LOG_LEVEL:-INFO}" == "DEBUG" ]]; then
         log "[DEBUG] $1"
@@ -37,8 +80,15 @@ get_proxmox_ticket() {
         "https://${PROXMOX_HOST}:${PROXMOX_PORT}/api2/json/access/ticket" \
         -d "username=${PROXMOX_USER}&password=${PROXMOX_PASSWORD}" 2>/dev/null)
     
-    local ticket
-    ticket=$(echo "$response" | jq -r '.data.ticket // empty')
+    local ticket=""
+    
+    # Intentar con jq primero, fallback a grep/sed
+    if command -v jq >/dev/null 2>&1; then
+        ticket=$(echo "$response" | jq -r '.data.ticket // empty')
+    else
+        # Fallback sin jq
+        ticket=$(echo "$response" | grep -o '"ticket":"[^"]*"' | sed 's/"ticket":"//;s/"//')
+    fi
     
     if [[ -z "$ticket" ]]; then
         log_error "Error al obtener ticket de Proxmox"
@@ -56,8 +106,15 @@ get_proxmox_csrf() {
         "https://${PROXMOX_HOST}:${PROXMOX_PORT}/api2/json/access/ticket" \
         -d "username=${PROXMOX_USER}&password=${PROXMOX_PASSWORD}" 2>/dev/null)
     
-    local csrf
-    csrf=$(echo "$response" | jq -r '.data.CSRFPreventionToken // empty')
+    local csrf=""
+    
+    # Intentar con jq primero, fallback a grep/sed
+    if command -v jq >/dev/null 2>&1; then
+        csrf=$(echo "$response" | jq -r '.data.CSRFPreventionToken // empty')
+    else
+        # Fallback sin jq
+        csrf=$(echo "$response" | grep -o '"CSRFPreventionToken":"[^"]*"' | sed 's/"CSRFPreventionToken":"//;s/"//')
+    fi
     
     if [[ -z "$csrf" ]]; then
         log_error "Error al obtener CSRF token de Proxmox"
