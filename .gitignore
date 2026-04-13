@@ -5,6 +5,9 @@ config/config.env
 logs/
 *.log
 
+# Archivos de Markdown (archivos ya commiteados se mantienen)
+*.md
+
 # Archivos temporales
 *.tmp
 *.bak
