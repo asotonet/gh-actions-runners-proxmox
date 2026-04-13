@@ -163,27 +163,40 @@ configure_lxc_for_docker() {
 
 wait_for_container_ready() {
     local ct_id="$1"
-    local max_wait=${2:-120}
+    local max_wait=${2:-300}
     local elapsed=0
-    
+
     log "⏳ Esperando a que el contenedor $ct_id esté listo..."
-    
+    log "   (La primera instalación del template puede tomar varios minutos)"
+
     while [[ $elapsed -lt $max_wait ]]; do
         local status
         status=$(proxmox_api_request "/nodes/$PROXMOX_NODE/lxc/$ct_id/status/current" "" "GET")
-        
-        if echo "$status" | grep -q '"running"'; then
+
+        # Debug: mostrar respuesta cada 30s
+        if [[ $((elapsed % 30)) -eq 0 && $elapsed -gt 0 ]]; then
+            log_debug "Status response: ${status:0:200}..."
+        fi
+
+        if echo "$status" | grep -q '"running"' || echo "$status" | grep -q '"status":"running"'; then
             log "✅ Contenedor $ct_id está corriendo"
             # Esperar un poco más para que el sistema esté completamente inicializado
-            sleep 10
+            log "   ⏳ Esperando inicialización del sistema..."
+            sleep 15
             return 0
         fi
-        
-        sleep 3
-        elapsed=$((elapsed + 3))
+
+        # Mostrar progreso cada 30 segundos
+        if [[ $((elapsed % 30)) -eq 0 && $elapsed -gt 0 ]]; then
+            log "   ⏳ Aún inicializando... (${elapsed}s/${max_wait}s)"
+        fi
+
+        sleep 5
+        elapsed=$((elapsed + 5))
     done
-    
+
     log "❌ Timeout: El contenedor no estuvo listo en ${max_wait}s"
+    log "💡 Verifica manualmente: pct status $ct_id"
     return 1
 }
 
