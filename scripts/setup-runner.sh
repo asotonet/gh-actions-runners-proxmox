@@ -48,6 +48,53 @@ detect_os() {
 
 DETECTED_OS=$(detect_os)
 
+# Generar clave SSH si no existe y copiar a Proxmox
+generate_ssh_key_if_needed() {
+    local ssh_key_file="${PROXMOX_SSH_KEY:-$HOME/.ssh/id_ed25519}"
+    local ssh_pub_key="${ssh_key_file}.pub"
+    
+    # Generar clave si no existe
+    if [[ ! -f "$ssh_key_file" ]]; then
+        echo "   🔑 Generando clave SSH..."
+        ssh-keygen -t ed25519 -f "$ssh_key_file" -N "" -q 2>/dev/null
+        if [[ $? -eq 0 ]]; then
+            echo "   ✅ Clave SSH generada: $ssh_key_file"
+        else
+            echo "   ❌ Falló generación de clave SSH"
+            return 1
+        fi
+    fi
+    
+    # Copiar clave pública a Proxmox
+    echo "   📤 Copiando clave SSH a Proxmox..."
+    local ssh_user="${PROXMOX_SSH_USER:-root}"
+    local ssh_host="${PROXMOX_SSH_HOST:-$PROXMOX_HOST}"
+    local ssh_port="${PROXMOX_SSH_PORT:-22}"
+    local pub_key_content
+    pub_key_content=$(cat "$ssh_pub_key")
+    
+    # Intentar copiar vía API de Proxmox o SSH
+    if command -v sshpass >/dev/null 2>&1 && [[ -n "${PROXMOX_SSH_PASSWORD:-}" ]]; then
+        sshpass -p "$PROXMOX_SSH_PASSWORD" ssh -o StrictHostKeyChecking=no -p "$ssh_port" "$ssh_user@$ssh_host" "mkdir -p ~/.ssh && echo '$pub_key_content' >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys" 2>/dev/null
+        if [[ $? -eq 0 ]]; then
+            echo "   ✅ Clave SSH copiada a Proxmox"
+            PROXMOX_SSH_KEY="$ssh_key_file"
+            return 0
+        fi
+    fi
+    
+    echo "   ⚠️  No se pudo copiar automáticamente la clave SSH"
+    echo "   💡 Copia manualmente la clave pública a Proxmox:"
+    echo "   cat $ssh_pub_key"
+    echo ""
+    echo "   Y en Proxmox ejecuta:"
+    echo "   echo '$pub_key_content' >> ~/.ssh/authorized_keys"
+    echo ""
+    echo "   Luego configura en config.env:"
+    echo "   PROXMOX_SSH_KEY=\"$ssh_key_file\""
+    return 1
+}
+
 # Instalar dependencias automáticamente
 install_dependencies() {
     local missing=()
@@ -91,12 +138,21 @@ install_dependencies() {
                 sshpass)
                     echo "   📥 Instalando sshpass..."
                     if command -v pacman >/dev/null 2>&1; then
-                        pacman -S --noconfirm sshpass 2>/dev/null || echo "   ❌ Falló pacman"
+                        pacman -S --noconfirm sshpass 2>/dev/null && echo "   ✅ sshpass instalado con pacman" || echo "   ❌ Falló pacman"
+                    elif command -v winget >/dev/null 2>&1; then
+                        echo "   💡 Intentando instalar sshpass via winget..."
+                        # winget puede no tener sshpass, intentamos descargar binario
+                        local sshpass_url="https://github.com/kevinburke/sshpass/releases/download/1.06/sshpass.exe"
+                        if curl -sL "$sshpass_url" -o /usr/bin/sshpass.exe 2>/dev/null && chmod +x /usr/bin/sshpass.exe; then
+                            echo "   ✅ sshpass descargado"
+                        else
+                            echo "   ⚠️  Falló descarga de sshpass"
+                            echo "   💡 Generando clave SSH como alternativa..."
+                            generate_ssh_key_if_needed
+                        fi
                     else
-                        echo "   💡 sshpass no disponible en Windows sin MSYS2"
-                        echo "   💡 Alternativa: Genera una clave SSH y úsala en Proxmox"
-                        echo "   💡 Ejecuta: ssh-keygen -t ed25519"
-                        echo "   💡 Luego copia la clave pública a Proxmox: ssh-copy-id root@PROXMOX_HOST"
+                        echo "   💡 sshpass no disponible - usando autenticación por clave SSH"
+                        generate_ssh_key_if_needed
                     fi
                     ;;
             esac
