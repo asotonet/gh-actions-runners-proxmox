@@ -494,33 +494,41 @@ list_lxc() {
 # Funciones de gestión de VMs
 # ==============================================================================
 
-# Generar nuevo ID de VM disponible
+# Generar nuevo ID de VM disponible (verifica VMs + LXC)
 generate_vm_id() {
     local start_id="${1:-100}"
     local end_id="${2:-999}"
-    
-    # Obtener VMs existentes
+
+    # Obtener VMs y LXC existentes
     local existing_vms
     existing_vms=$(proxmox_api_request "/nodes/$PROXMOX_NODE/qemu" "" "GET")
-    
-    # Extraer IDs existentes
-    local used_ids
+    local existing_cts
+    existing_cts=$(proxmox_api_request "/nodes/$PROXMOX_NODE/lxc" "" "GET")
+
+    # Extraer IDs existentes (VMs + LXC)
+    local used_ids=""
     if command -v jq >/dev/null 2>&1; then
-        used_ids=$(echo "$existing_vms" | jq -r '.data[].vmid // empty' 2>/dev/null)
+        local vm_ids lxc_ids
+        vm_ids=$(echo "$existing_vms" | jq -r '.data[].vmid // empty' 2>/dev/null)
+        lxc_ids=$(echo "$existing_cts" | jq -r '.data[].vmid // empty' 2>/dev/null)
+        used_ids=$(printf '%s\n%s' "$vm_ids" "$lxc_ids" | grep -v '^$' | sort -un)
     else
-        used_ids=$(echo "$existing_vms" | grep -o '"vmid":[0-9]*' | cut -d: -f2 | sort -n)
+        local vm_part lxc_part
+        vm_part=$(echo "$existing_vms" | grep -o '"vmid":[0-9]*' | cut -d: -f2)
+        lxc_part=$(echo "$existing_cts" | grep -o '"vmid":[0-9]*' | cut -d: -f2)
+        used_ids=$(printf '%s\n%s' "$vm_part" "$lxc_part" | grep -v '^$' | sort -un)
     fi
-    
+
     # Buscar ID disponible
     for id in $(seq "$start_id" "$end_id"); do
         if ! echo "$used_ids" | grep -qw "^${id}$"; then
-            log "📋 IDs usados encontrados: $(echo $used_ids | tr '\n' ', ' | sed 's/,$//')" >&2
+            log "IDs usados encontrados (VMs + LXC): $(echo $used_ids | tr '\n' ', ' | sed 's/,$//')" >&2
             echo "$id"
             return 0
         fi
     done
-    
-    log_error "No hay IDs de VM disponibles en el rango $start_id-$end_id"
+
+    log_error "No hay IDs disponibles en el rango $start_id-$end_id"
     return 1
 }
 
