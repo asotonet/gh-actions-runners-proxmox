@@ -128,21 +128,23 @@ get_github_runner_token() {
 setup_ssh_access() {
     local ssh_key_file="${PROXMOX_SSH_KEY:-$HOME/.ssh/id_ed25519}"
     local ssh_pub_key="${ssh_key_file}.pub"
-    
+
     # Generar clave si no existe
     if [[ ! -f "$ssh_key_file" ]]; then
-        log "🔑 Generando clave SSH..."
+        log "🔑 Generando clave SSH..." >&2
         ssh-keygen -t ed25519 -f "$ssh_key_file" -N "" -q 2>/dev/null
-        log "✅ Clave SSH generada: $ssh_key_file"
+        log "✅ Clave SSH generada: $ssh_key_file" >&2
     fi
-    
-    # Mostrar clave pública para que el usuario la copie a Proxmox si no está
-    local pub_key_content
-    pub_key_content=$(cat "$ssh_pub_key")
-    
-    log "📋 Clave SSH pública:"
-    log "   $pub_key_content"
-    
+
+    # Mostrar clave pública
+    if [[ -f "$ssh_pub_key" ]]; then
+        local pub_key_content
+        pub_key_content=$(cat "$ssh_pub_key")
+        log "📋 Clave SSH pública:" >&2
+        log "   $pub_key_content" >&2
+    fi
+
+    # Solo devolver la ruta del archivo (stdout)
     echo "$ssh_key_file"
 }
 
