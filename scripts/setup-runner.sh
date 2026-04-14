@@ -176,7 +176,7 @@ create_vm() {
     # =============================================
     log "Clonando template $template_id -> VM $vm_id..."
 
-    local params="vmid=${vm_id}"
+    local params="newid=${vm_id}"
     params+="&name=${vm_name}"
     params+="&full=1"
     params+="&storage=${VM_STORAGE}"
