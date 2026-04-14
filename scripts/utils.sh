@@ -297,9 +297,9 @@ proxmox_api_request() {
     echo "$response"
 }
 
-# Ejecutar comando en contenedor LXC via API
+# Ejecutar comando en contenedor LXC o VM QEMU via API
 exec_in_lxc() {
-    local ct_id="$1"
+    local vm_id="$1"
     local command="$2"
     local timeout="${3:-300}"
     
@@ -314,9 +314,9 @@ exec_in_lxc() {
     local csrf
     csrf=$(get_proxmox_csrf)
     
-    local url="https://${PROXMOX_HOST}:${PROXMOX_PORT}/api2/json/nodes/${PROXMOX_NODE}/lxc/${ct_id}/exec"
+    # Intentar endpoint de QEMU agent primero
+    local url="https://${PROXMOX_HOST}:${PROXMOX_PORT}/api2/json/nodes/${PROXMOX_NODE}/qemu/${vm_id}/agent/exec"
     
-    # Probar con el formato correcto del endpoint
     local response
     response=$(curl -s -k -w "\nHTTP_CODE:%{http_code}" \
         -X POST \
@@ -324,7 +324,6 @@ exec_in_lxc() {
         --data-urlencode "command=bash" \
         --data-urlencode "args[0]=-c" \
         --data-urlencode "args[1]=$command" \
-        --data-urlencode "timeout=$timeout" \
         -H "Authorization: PVEAuthCookie=$ticket" \
         -H "CSRFPreventionToken: $csrf" \
         -H "Content-Type: application/x-www-form-urlencoded" 2>/dev/null)
@@ -336,9 +335,28 @@ exec_in_lxc() {
     if [[ "$http_code" == "200" ]] && echo "$response" | grep -qi '"data"'; then
         return 0
     else
-        log "   ❌ Exec API HTTP $http_code - ${response:0:200}"
-        return 1
+        # Fallback to LXC endpoint
+        url="https://${PROXMOX_HOST}:${PROXMOX_PORT}/api2/json/nodes/${PROXMOX_NODE}/lxc/${vm_id}/exec"
+        response=$(curl -s -k -w "\nHTTP_CODE:%{http_code}" \
+            -X POST \
+            "$url" \
+            --data-urlencode "command=bash" \
+            --data-urlencode "args[0]=-c" \
+            --data-urlencode "args[1]=$command" \
+            -H "Authorization: PVEAuthCookie=$ticket" \
+            -H "CSRFPreventionToken: $csrf" \
+            -H "Content-Type: application/x-www-form-urlencoded" 2>/dev/null)
+        
+        http_code=$(echo "$response" | grep "HTTP_CODE:" | sed 's/HTTP_CODE://')
+        response=$(echo "$response" | sed '$d')
+        
+        if [[ "$http_code" != "200" ]]; then
+            log "   ❌ Exec API HTTP $http_code - ${response:0:200}"
+            return 1
+        fi
     fi
+    
+    return 0
 }
 
 # ==============================================================================
