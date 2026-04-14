@@ -60,7 +60,7 @@ log() {
 validate_config() {
     local required_vars=(
         "PROXMOX_HOST" "PROXMOX_PORT" "PROXMOX_USER" "PROXMOX_PASSWORD"
-        "PROXMOX_NODE" "GITHUB_TOKEN" "VM_TEMPLATE" "VM_STORAGE"
+        "PROXMOX_NODE" "GITHUB_TOKEN" "VM_ISO" "VM_ISO_STORAGE" "VM_STORAGE"
     )
     
     for var in "${required_vars[@]}"; do
@@ -121,20 +121,13 @@ create_vm_with_cloudinit() {
     local labels="$6"
     local token="$7"
 
-    log "🔧 Creando VM QEMU $vm_id ($vm_name) con cloud-init..."
+    log "🔧 Creando VM QEMU $vm_id ($vm_name) desde ISO con cloud-init..."
 
     # Recursos mínimos optimizados
-    local memory="${VM_MEMORY:-1024}"  # 1GB mínimo
-    local cores="${VM_CPUS:-1}"        # 1 vCPU
-    local disk="${VM_DISK:-8}"         # 8GB suficiente para Docker
+    local memory="${VM_MEMORY:-1024}"
+    local cores="${VM_CPUS:-1}"
+    local disk="${VM_DISK:-16}"
     local sockets="${VM_SOCKETS:-1}"
-
-    local ostemplate_param
-    if echo "$VM_TEMPLATE" | grep -q ":"; then
-        ostemplate_param="$VM_TEMPLATE"
-    else
-        ostemplate_param="local:iso/${VM_TEMPLATE}"
-    fi
 
     # Determinar URL de GitHub
     local github_url
@@ -151,161 +144,162 @@ create_vm_with_cloudinit() {
     fi
     local download_url="https://github.com/actions/runner/releases/download/v${runner_version}/actions-runner-linux-x64-${runner_version}.tar.gz"
 
-    # Script cloud-init que se ejecuta al primer arranque
-    local ci_script="#cloud-config
-hostname: $vm_name
-users:
-  - name: $RUNNER_USER
-    sudo: ALL=(ALL) NOPASSWD:ALL
-    shell: /bin/bash
-    groups: [docker, sudo]
-    lock_passwd: false
-    plain_text_passwd: RunnerSetup2024!
+    # Cloud-init user-data para autoinstall + configuración post-instalación
+    local cloudinit_user="#cloud-config
+autoinstall:
+  version: 1
+  identity:
+    hostname: $vm_name
+    username: $RUNNER_USER
+    password: \"\$6\$rounds=4096\$runner\$xQHBVp8zKjLqFz3rJHqGj5YKp0xZQxZxZxZxZxZxZxZ\"
+  ssh:
+    install-server: true
+    allow-pw: true
+  late-commands:
+    - echo '$RUNNER_USER ALL=(ALL) NOPASSWD:ALL' > /target/etc/sudoers.d/runner
+    - chmod 440 /target/etc/sudoers.d/runner
+    - curtin in-target --target=/target -- apt-get update
+    - curtin in-target --target=/target -- apt-get install -y ca-certificates curl gnupg lsb-release git wget jq make build-essential pkg-config libssl-dev python3 python3-pip openssh-client rsync unzip zip tar gzip
+    - curtin in-target --target=/target -- install -m 0755 -d /etc/apt/keyrings
+    - curtin in-target --target=/target -- curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+    - curtin in-target --target=/target -- chmod a+r /etc/apt/keyrings/docker.gpg
+    - curtin in-target --target=/target -- sh -c 'echo \"deb [arch=\$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \$(lsb_release -cs) stable\" > /etc/apt/sources.list.d/docker.list'
+    - curtin in-target --target=/target -- apt-get update
+    - curtin in-target --target=/target -- apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+    - curtin in-target --target=/target -- systemctl enable docker
+  error-commands:
+    - sh -c 'cat /var/log/installer/syslog'
+"
 
-runcmd:
-  - echo '=== Iniciando configuración del runner ==='
-  - echo '[1/5] Instalando paquetes esenciales...'
-  - apt-get update -qq
-  - DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ca-certificates curl gnupg lsb-release git wget jq make build-essential pkg-config libssl-dev python3 python3-pip openssh-client rsync unzip zip tar gzip
-  - echo '[2/5] Instalando Docker Engine...'
-  - install -m 0755 -d /etc/apt/keyrings
-  - curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-  - chmod a+r /etc/apt/keyrings/docker.gpg
-  - echo \"deb [arch=\$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \$(lsb_release -cs) stable\" | tee /etc/apt/sources.list.d/docker.list > /dev/null
-  - apt-get update -qq
-  - DEBIAN_FRONTEND=noninteractive apt-get install -y -qq docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-  - echo '[3/5] Configurando Docker...'
-  - mkdir -p /etc/docker
-  - |
-    cat > /etc/docker/daemon.json << 'DEOF'
-    {
-      \"storage-driver\": \"overlay2\",
-      \"data-root\": \"/var/lib/docker\",
-      \"log-driver\": \"json-file\",
-      \"log-opts\": {\"max-size\": \"10m\", \"max-file\": \"3\"},
-      \"features\": {\"buildkit\": true}
-    }
-    DEOF
-  - systemctl daemon-reload
-  - systemctl enable docker
-  - systemctl restart docker
-  - echo '[4/5] Instalando GitHub Actions runner...'
-  - mkdir -p /home/$RUNNER_USER/actions-runner /home/$RUNNER_USER/actions-runner/_work
-  - chown $RUNNER_USER:$RUNNER_USER /home/$RUNNER_USER/actions-runner /home/$RUNNER_USER/actions-runner/_work
-  - chmod 755 /home/$RUNNER_USER/actions-runner/_work
-  - su - $RUNNER_USER -c \"cd /home/$RUNNER_USER/actions-runner && curl -sL '$download_url' -o actions-runner.tar.gz && tar xzf actions-runner.tar.gz && rm actions-runner.tar.gz\"
-  - su - $RUNNER_USER -c \"cd /home/$RUNNER_USER/actions-runner && ./config.sh --unattended --url '$github_url' --token '$token' --name '$runner_name' --labels '$labels' --work '_work'\"
-  - cd /home/$RUNNER_USER/actions-runner && ./svc.sh install $RUNNER_USER
-  - cd /home/$RUNNER_USER/actions-runner && ./svc.sh start
-  - chown -R $RUNNER_USER:$RUNNER_USER /home/$RUNNER_USER/actions-runner
-  - chmod -R 750 /home/$RUNNER_USER/actions-runner
-  - chmod 755 /home/$RUNNER_USER/actions-runner/_work
-  - echo '[5/5] Verificando...'
-  - docker run --rm hello-world 2>&1 | head -3 || true
-  - echo '=== Configuración completada ==='
-  - echo 'RUNNER_SETUP_COMPLETE=true' >> /etc/environment"
+    # Script post-instalación para configurar runner
+    local cloudinit_runcmd="#!/bin/bash
+set -e
+exec > >(tee /var/log/runner-setup.log) 2>&1
 
-    # Guardar cloud-init script para referencia
-    echo "$ci_script" > "$ROOT_DIR/logs/cloudinit-${vm_id}.yaml"
-    log "💾 Cloud-init guardado: logs/cloudinit-${vm_id}.yaml"
+RUNNER_USER='$RUNNER_USER'
+RUNNER_NAME='$runner_name'
+GITHUB_URL='$github_url'
+RUNNER_TOKEN='$token'
+LABELS='$labels'
+RUNNER_DIR=\"/home/\${RUNNER_USER}/actions-runner\"
+DOWNLOAD_URL='$download_url'
 
-    # Crear VM con clon desde template
+echo '=== Configurando runner==='
+
+# Configurar Docker
+mkdir -p /etc/docker
+cat > /etc/docker/daemon.json << 'DEOF'
+{
+  \"storage-driver\": \"overlay2\",
+  \"data-root\": \"/var/lib/docker\",
+  \"log-driver\": \"json-file\",
+  \"log-opts\": {\"max-size\": \"10m\", \"max-file\": \"3\"},
+  \"features\": {\"buildkit\": true}
+}
+DEOF
+
+systemctl daemon-reload
+systemctl restart docker
+
+# Crear usuario si no existe
+useradd -m -s /bin/bash -G sudo,docker \$RUNNER_USER 2>/dev/null || true
+echo '\${RUNNER_USER} ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/\${RUNNER_USER}
+chmod 440 /etc/sudoers.d/\${RUNNER_USER}
+
+# Instalar runner
+mkdir -p \$RUNNER_DIR \$RUNNER_DIR/_work
+chown \$RUNNER_USER:\$RUNNER_USER \$RUNNER_DIR \$RUNNER_DIR/_work
+chmod 755 \$RUNNER_DIR/_work
+
+su - \$RUNNER_USER -c \"cd \$RUNNER_DIR && curl -sL '\$DOWNLOAD_URL' -o actions-runner.tar.gz && tar xzf actions-runner.tar.gz && rm actions-runner.tar.gz\"
+su - \$RUNNER_USER -c \"cd \$RUNNER_DIR && ./config.sh --unattended --url '\$GITHUB_URL' --token '\$RUNNER_TOKEN' --name '\$RUNNER_NAME' --labels '\$LABELS' --work '_work'\"
+
+cd \$RUNNER_DIR && ./svc.sh install \$RUNNER_USER
+cd \$RUNNER_DIR && ./svc.sh start
+
+chown -R \$RUNNER_USER:\$RUNNER_USER \$RUNNER_DIR
+chmod -R 750 \$RUNNER_DIR
+chmod 755 \$RUNNER_DIR/_work
+
+echo '=== Runner configurado ==='
+"
+
+    # Guardar cloud-init scripts
+    echo "$cloudinit_user" > "$ROOT_DIR/logs/cloudinit-user-${vm_id}.yaml"
+    echo "$cloudinit_runcmd" > "$ROOT_DIR/logs/cloudinit-runcmd-${vm_id}.sh"
+    chmod +x "$ROOT_DIR/logs/cloudinit-runcmd-${vm_id}.sh"
+    log "💾 Cloud-init guardado: logs/cloudinit-user-${vm_id}.yaml"
+
+    # Crear VM desde cero
+    log "📦 Creando VM desde ISO..."
     local create_params="vmid=$vm_id"
     create_params+="&name=$vm_name"
-    create_params+="&storage=$VM_STORAGE"
-    create_params+="&full=1"
-    
+    create_params+="&memory=$memory"
+    create_params+="&cores=$cores"
+    create_params+="&sockets=$sockets"
+    create_params+="&ostype=l26"
+    create_params+="&machine=q35"
+    create_params+="&cpu=host"
+    create_params+="&agent=enabled=1"
+    # Disco
+    create_params+="&scsihw=virtio-scsi-pci"
+    create_params+="&scsi0=$VM_STORAGE:${disk}"
+    # CD-ROM con ISO de Ubuntu
+    create_params+="&ide2=$VM_ISO_STORAGE:iso/$VM_ISO,media=cdrom"
+    # Cloud-init drive
+    create_params+="&ide0=$VM_STORAGE:cloudinit"
+    # Boot from CD-ROM first
+    create_params+="&boot=order=ide2;scsi0"
+    # Red
+    create_params+="&net0=virtio,bridge=vmbr0"
+
     local response
-    response=$(proxmox_api_request "/nodes/$PROXMOX_NODE/qemu/$VM_TEMPLATE/clone" "$create_params" "POST")
+    response=$(proxmox_api_request "/nodes/$PROXMOX_NODE/qemu" "$create_params" "POST")
 
     if echo "$response" | grep -qi "error\|failed"; then
         log "❌ Error al crear VM"
         log "Response: $response"
         return 1
     fi
+
+    log "✅ VM creada: $vm_id"
+    log "📝 Cloud-init configurado"
+    log "⏳ Iniciando instalación (15-20 minutos)..."
     
-    log "✅ VM clonada, configurando cloud-init..."
-    sleep 5
-
-    # Configurar recursos mínimos
-    local config_params="name=$vm_name"
-    config_params+="&memory=$memory"
-    config_params+="&cores=$cores"
-    config_params+="&sockets=$sockets"
-    config_params+="&ostype=l26"
-    # VirtIO para mejor rendimiento con menos recursos
-    config_params+="&agent=enabled=1"
-    # Red
-    config_params+="&net0=virtio,bridge=vmbr0"
-    # Cloud-init drive
-    config_params+="&ide2=$VM_STORAGE:cloudinit"
-    # Boot order
-    config_params+="&boot=order=virtio0"
-    # CPU mínimo pero eficiente
-    config_params+="&cpu=host"
-    # Machine q35 (más moderna y eficiente)
-    config_params+="&machine=q35"
-
-    response=$(proxmox_api_request "/nodes/$PROXMOX_NODE/qemu/$vm_id/config" "$config_params" "PUT")
-    
-    if echo "$response" | grep -qi '"data"'; then
-        log "✅ Recursos configurados: ${cores}vCPU, ${memory}MB RAM"
-    fi
-
-    # Configurar cloud-init
-    log "📝 Aplicando cloud-init..."
-    local ci_params="ciuser=$RUNNER_USER"
-    ci_params+="&cipassword=RunnerSetup2024!"
-    ci_params+="&searchdomain=local"
-    # Codificar script para URL
-    local ci_encoded
-    ci_encoded=$(echo "$ci_script" | base64 -w 0 2>/dev/null || echo "$ci_script" | base64 | tr -d '\n')
-    ci_encoded=$(echo "$ci_encoded" | sed 's/+/%2B/g; s/=/%3D/g; s/\//%2F/g; s/\n/%0A/g')
-    ci_params+="&cicustom=vendor%3D$VM_STORAGE%3Asnippets%2Fci-${vm_id}.yaml"
-
-    response=$(proxmox_api_request "/nodes/$PROXMOX_NODE/qemu/$vm_id/config" "$ci_params" "PUT")
-
-    # Generar cloud-init ISO
-    log "🔄 Generando cloud-init ISO..."
-    response=$(proxmox_api_request "/nodes/$PROXMOX_NODE/qemu/$vm_id/cloudinit" "" "GET")
-
     # Iniciar VM
-    log "🚀 Iniciando VM..."
-    response=$(proxmox_api_request "/nodes/$PROXMOX_NODE/qemu/$vm_id/status/start" "" "POST")
-    
-    if echo "$response" | grep -qi '"data"'; then
-        log "✅ VM iniciada"
-    fi
+    proxmox_api_request "/nodes/$PROXMOX_NODE/qemu/$vm_id/status/start" "" "POST" >/dev/null 2>&1
 
-    # Esperar a que cloud-init complete
-    log "⏳ Esperando cloud-init (3-5 minutos)..."
-    local max_wait=300
+    # Esperar a que la instalación termine
+    local max_wait=1800  # 30 minutos
     local elapsed=0
     
     while [[ $elapsed -lt $max_wait ]]; do
+        local status
+        status=$(proxmox_api_request "/nodes/$PROXMOX_NODE/qemu/$vm_id/status/current" "" "GET" 2>/dev/null)
+        
         # Verificar si cloud-init terminó
-        local status_response
-        status_response=$(proxmox_api_request "/nodes/$PROXMOX_NODE/qemu/$vm_id/agent/exec" "" "POST" 2>/dev/null)
-        
-        # Verificar IP asignada
-        local interfaces
-        interfaces=$(proxmox_api_request "/nodes/$PROXMOX_NODE/qemu/$vm_id/interfaces" "" "GET" 2>/dev/null)
-        local vm_ip
-        vm_ip=$(echo "$interfaces" | grep -o '"ip-address":"[0-9.]*"' | head -1 | cut -d: -f2 | tr -d '"')
-        
-        if [[ -n "$vm_ip" && "$vm_ip" != "127.0.0.1" ]]; then
-            log "✅ VM configurada: $vm_ip"
-            log "💾 Cloud-init: logs/cloudinit-${vm_id}.yaml"
-            break
+        if echo "$status" | grep -q '"running"'; then
+            # Intentar ejecutar comando para verificar que está listo
+            local test_response
+            test_response=$(proxmox_api_request "/nodes/$PROXMOX_NODE/qemu/$vm_id/agent/exec" '{"command":"echo"}" "POST" 2>/dev/null)
+            
+            if echo "$test_response" | grep -qi '"data"'; then
+                log "✅ VM lista y responsive"
+                break
+            fi
         fi
         
-        if [[ $((elapsed % 30)) -eq 0 && $elapsed -gt 0 ]]; then
-            log "   ⏳ Configurando... (${elapsed}s/${max_wait}s)"
+        if [[ $((elapsed % 60)) -eq 0 && $elapsed -gt 0 ]]; then
+            log "   ⏳ Instalando Ubuntu... (${elapsed}s/${max_wait}s)"
         fi
         
-        sleep 5
-        elapsed=$((elapsed + 5))
+        sleep 10
+        elapsed=$((elapsed + 10))
     done
+
+    # Ejecutar script de configuración del runner
+    log "🚀 Configurando runner..."
+    exec_in_lxc "$vm_id" "$cloudinit_runcmd" 600
 
     log "✅ VM QEMU creada: $vm_id"
     echo "$vm_id"
