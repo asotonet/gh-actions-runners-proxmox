@@ -134,9 +134,6 @@ configure_lxc_for_docker() {
 
     log "⚙️  Configurando contenedor LXC $ct_id para soportar Docker..."
 
-    # Usar la API de Proxmox para configurar el contenedor
-    # PUT /api2/json/nodes/{node}/lxc/{vmid}/config
-
     local config_params="hookscript=&"
     config_params+="features=nesting=1,keyctl=1&"
     config_params+="lxc.apparmor.profile=unconfined&"
@@ -154,9 +151,11 @@ configure_lxc_for_docker() {
         log "✅ lxc.cgroup2.devices.allow: a - Aplicado"
         log "✅ features: nesting=1,keyctl=1 - Aplicado"
         
-        # Reiniciar contenedor para aplicar cambios
+        # Reiniciar contenedor via API (stop + start)
         log "🔄 Reiniciando contenedor para aplicar cambios..."
-        exec_on_proxmox_host "pct shutdown $ct_id --timeout 30 && sleep 3 && pct start $ct_id"
+        proxmox_api_request "/nodes/$PROXMOX_NODE/lxc/$ct_id/status/stop" "" "POST" >/dev/null 2>&1
+        sleep 5
+        proxmox_api_request "/nodes/$PROXMOX_NODE/lxc/$ct_id/status/start" "" "POST" >/dev/null 2>&1
         sleep 10
     else
         log "⚠️  No se pudo aplicar configuración via API"
@@ -679,7 +678,10 @@ main() {
     fi
     
     # Paso 7: Instalar y configurar el runner en el home del usuario
-    install_runner_in_user_home "$CT_ID" "$RUNNER_NAME" "$token" "$repo_or_org" "$ORG" "$LABELS"
+    # El nombre del runner incluye el ID del contenedor LXC
+    local runner_name_with_id="${RUNNER_NAME}-${CT_ID}"
+    log "📝 Nombre del runner en GitHub: $runner_name_with_id"
+    install_runner_in_user_home "$CT_ID" "$runner_name_with_id" "$token" "$repo_or_org" "$ORG" "$LABELS"
     
     log "================================================"
     log "✅ Runner '$RUNNER_NAME' configurado exitosamente"
