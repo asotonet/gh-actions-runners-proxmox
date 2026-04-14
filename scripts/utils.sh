@@ -482,27 +482,11 @@ get_lxc_status() {
 list_lxc() {
     local response
     response=$(proxmox_api_request "/nodes/$PROXMOX_NODE/lxc" "" "GET")
-    
-    echo "$response" | jq -r '.data[] | "\(.vmid) | \(.name) | \(.status) | \(.mem // 0) | \(.disk // 0)"'
-}
 
-# Ejecutar comando en contenedor LXC
-exec_in_lxc() {
-    local ct_id="$1"
-    local command="$2"
-    local user="${3:-root}"
-    
-    # Usar pct exec para ejecutar comandos en el contenedor
-    # Nota: Esto requiere acceso directo al host de Proxmox
-    if command -v pct >/dev/null 2>&1; then
-        if [[ "$user" == "root" ]]; then
-            pct exec "$ct_id" -- bash -c "$command"
-        else
-            pct exec "$ct_id" -- sudo -u "$user" bash -c "$command"
-        fi
+    if command -v jq >/dev/null 2>&1; then
+        echo "$response" | jq -r '.data[] | "\(.vmid) | \(.name) | \(.status) | \(.mem // 0) | \(.disk // 0)"'
     else
-        log_error "pct no está disponible. Se requiere acceso al host de Proxmox"
-        return 1
+        echo "$response" | grep -o '"vmid":[0-9]*' | cut -d: -f2
     fi
 }
 
