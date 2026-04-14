@@ -228,8 +228,10 @@ SCRIPTEOF
     create_params+="&scsihw=virtio-scsi-pci"
     create_params+="&scsi0=${VM_STORAGE}:${disk}"
     create_params+="&cdrom=${VM_ISO_STORAGE}:iso/${VM_ISO}"
-    create_params+="&ide0=${VM_STORAGE}:cloudinit"
+    create_params+="&ide0=${VM_STORAGE}:cloudinit,media=cdrom"
     create_params+="&net0=virtio=BC:24:11:02:02:02,bridge=vmbr0"
+    # Boot desde CD-ROM (ISO de Ubuntu)
+    create_params+="&boot=order=ide2"
 
     local response
     response=$(proxmox_api_request "/nodes/$PROXMOX_NODE/qemu" "$create_params" "POST")
@@ -253,12 +255,6 @@ SCRIPTEOF
     # Regenerar cloud-init ISO
     log "Generando cloud-init ISO..."
     proxmox_api_request "/nodes/$PROXMOX_NODE/qemu/$vm_id/cloudinit" "" "POST" >/dev/null 2>&1
-
-    # Configurar boot order para que lea CD-ROM primero
-    log "Configurando boot order..."
-    local boot_resp
-    boot_resp=$(proxmox_api_request "/nodes/$PROXMOX_NODE/qemu/$vm_id/config" "boot=order=ide2" "PUT")
-    sleep 2
 
     # Verificar configuracion
     log "Verificando configuracion..."
