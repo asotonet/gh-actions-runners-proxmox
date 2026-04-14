@@ -297,6 +297,50 @@ proxmox_api_request() {
     echo "$response"
 }
 
+# Esperar a que una tarea de Proxmox termine
+wait_for_task() {
+    local upid="$1"
+    local max_wait="${2:-300}"
+    local elapsed=0
+    
+    local ticket csrf node
+    ticket=$(get_proxmox_ticket)
+    csrf=$(get_proxmox_csrf)
+    node=$(echo "$upid" | cut -d: -f2)
+    
+    [[ -z "$ticket" || -z "$node" ]] && return 1
+    
+    log "Esperando tarea $upid..."
+    
+    while [[ $elapsed -lt $max_wait ]]; do
+        local task_status
+        task_status=$(curl -s -k -X GET \
+            "https://${PROXMOX_HOST}:${PROXMOX_PORT}/api2/json/nodes/${node}/tasks/${upid}/status" \
+            -H "Authorization: PVEAuthCookie=$ticket" \
+            -H "CSRFPreventionToken: $csrf" 2>/dev/null)
+        
+        local status
+        status=$(echo "$task_status" | grep -o '"status":"[^"]*"' | head -1 | sed 's/.*"status":"//;s/"$//')
+        
+        if [[ "$status" == "stopped" ]]; then
+            local exit_code
+            exit_code=$(echo "$task_status" | grep -o '"exitstatus":"[^"]*"' | head -1 | sed 's/.*"exitstatus":"//;s/"$//')
+            if echo "$exit_code" | grep -qi "OK"; then
+                return 0
+            else
+                log "Task failed: $exit_code"
+                return 1
+            fi
+        fi
+        
+        sleep 3
+        elapsed=$((elapsed + 3))
+    done
+    
+    log "Task timeout after ${max_wait}s"
+    return 1
+}
+
 # Ejecutar comando en contenedor LXC o VM QEMU via API
 exec_in_lxc() {
     local vm_id="$1"

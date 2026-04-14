@@ -187,12 +187,24 @@ create_vm() {
     if echo "$resp" | grep -qi "error\|failed"; then
         log "Error al clonar template: $resp"
         log ""
-        log "¿Existe el template $template_id?"
+        log "Verifica que el template $template_id existe en Proxmox"
         log "Crealo con: ./scripts/create-base-template.sh --template-id $template_id"
         return 1
     fi
 
-    log "VM clonada correctamente"
+    # Extraer UPID del resultado y esperar a que termine
+    local upid
+    upid=$(echo "$resp" | grep -o '"data":"[^"]*"' | sed 's/"data":"//;s/"$//')
+
+    if [[ -n "$upid" ]]; then
+        log "Clonando... (tarea: $upid)"
+        if wait_for_task "$upid" 600; then
+            log "Clone completado"
+        else
+            log "Error durante el clone"
+            return 1
+        fi
+    fi
 
     # =============================================
     # Reconfigurar VM (recursos + cloud-init)
