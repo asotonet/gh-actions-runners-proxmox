@@ -92,12 +92,15 @@ get_github_runner_token() {
     fi
     
     log "🔑 Solicitando nuevo token de registro para runner '$runner_name'..."
+    log "   URL: $url"
     
     local response
     response=$(curl -s -X POST "$url" \
         -H "Accept: application/vnd.github+json" \
         -H "Authorization: Bearer $GITHUB_TOKEN" \
         -H "X-GitHub-Api-Version: 2022-11-28")
+    
+    log "   Response: ${response:0:100}"
     
     local token
     local expires_at
@@ -106,8 +109,9 @@ get_github_runner_token() {
         token=$(echo "$response" | jq -r '.token // empty')
         expires_at=$(echo "$response" | jq -r '.expires_at // empty')
     else
-        token=$(echo "$response" | grep -o '"token":"[^"]*"' | sed 's/"token":"//;s/"//')
-        expires_at=$(echo "$response" | grep -o '"expires_at":"[^"]*"' | sed 's/"expires_at":"//;s/"//')
+        # Fallback: manejar espacios después de :
+        token=$(echo "$response" | grep -o '"token": *"[^"]*"' | head -1 | sed 's/.*"token": *"//;s/"$//')
+        expires_at=$(echo "$response" | grep -o '"expires_at": *"[^"]*"' | head -1 | sed 's/.*"expires_at": *"//;s/"$//')
     fi
 
     if [[ -z "$token" ]]; then
