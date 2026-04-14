@@ -326,30 +326,43 @@ echo 'RUNNER_SETUP_COMPLETE=true' >> /etc/environment
 
     log "✅ Contenedor LXC creado exitosamente con ID: $ct_id"
 
-    # Ahora inyectar y ejecutar el script de init
     log "🚀 Iniciando configuración automática del runner..."
-    wait_for_and_configure "$ct_id" "$init_script"
-
-    echo "$ct_id"
-}
-
-wait_for_and_configure() {
-    local ct_id="$1"
-    local init_script="$2"
     
-    log "⏳ Esperando a que el contenedor esté listo..."
-    sleep 30
-
-    # Intentar copiar el script al contenedor y ejecutarlo
-    # Método: copiar via API de archivos (si está disponible) o esperar a que cloud-init lo haga
+    # Inyectar script de configuración dentro del contenedor
+    # Se copia al filesystem del contenedor via el path directo en Proxmox
+    local ct_rootfs
+    if [[ -d "/var/lib/lxc/$ct_id/rootfs" ]]; then
+        ct_rootfs="/var/lib/lxc/$ct_id/rootfs"
+    elif [[ -d "/rpool/data/subvol-$ct_id-disk-0" ]]; then
+        ct_rootfs="/rpool/data/subvol-$ct_id-disk-0"
+    fi
     
-    log "📝 El script de configuración se ejecutará automáticamente al arrancar"
-    log "💡 Para verificar el progreso:"
-    log "   pct exec $ct_id -- tail -f /var/log/runner-setup.log"
-    log ""
-    log "💡 Si necesitas ejecutar manualmente:"
-    log "   1. Copia el archivo logs/init-runner-${ct_id}.sh al contenedor"
-    log "   2. Ejecuta: pct exec $ct_id -- bash /tmp/init-runner.sh"
+    if [[ -n "${ct_rootfs:-}" && -d "$ct_rootfs" ]]; then
+        log "📁 Inyectando script en el contenedor..."
+        local target_dir="${ct_rootfs}/opt"
+        mkdir -p "$target_dir"
+        echo "$init_script" > "${target_dir}/setup-runner.sh"
+        chmod +x "${target_dir}/setup-runner.sh"
+        
+        # Configurar para ejecutar automáticamente al arrancar
+        local rc_local="${ct_rootfs}/etc/rc.local"
+        cat > "$rc_local" << 'RCEOF'
+#!/bin/bash
+if [[ -f /opt/setup-runner.sh ]]; then
+    /opt/setup-runner.sh &
+    rm -f /opt/setup-runner.sh
+fi
+exit 0
+RCEOF
+        chmod +x "$rc_local"
+        
+        log "✅ Script inyectado y configurado para ejecución automática"
+    else
+        log "⚠️  No se pudo acceder al filesystem del contenedor"
+        log "💡 Ejecuta manualmente:"
+        log "   pct push $ct_id $ROOT_DIR/logs/init-runner-${ct_id}.sh /opt/setup-runner.sh"
+        log "   pct exec $ct_id -- bash /opt/setup-runner.sh"
+    fi
 }
 
 ###############################################################################
