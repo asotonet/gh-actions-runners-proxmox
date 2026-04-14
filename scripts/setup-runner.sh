@@ -229,7 +229,7 @@ SCRIPTEOF
     create_params+="&scsi0=${VM_STORAGE}:${disk}"
     create_params+="&cdrom=${VM_ISO_STORAGE}:iso/${VM_ISO}"
     create_params+="&ide0=${VM_STORAGE}:cloudinit"
-    create_params+="&net0=virtio,bridge=vmbr0"
+    create_params+="&net0=bridge=vmbr0"
 
     local response
     response=$(proxmox_api_request "/nodes/$PROXMOX_NODE/qemu" "$create_params" "POST")
