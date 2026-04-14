@@ -678,8 +678,8 @@ main() {
     fi
     
     # Paso 7: Instalar y configurar el runner en el home del usuario
-    # El nombre del runner incluye el ID del contenedor LXC
-    local runner_name_with_id="${RUNNER_NAME}-${CT_ID}"
+    # El nombre del runner siempre es "runner-CT_ID"
+    local runner_name_with_id="runner-${CT_ID}"
     log "📝 Nombre del runner en GitHub: $runner_name_with_id"
     install_runner_in_user_home "$CT_ID" "$runner_name_with_id" "$token" "$repo_or_org" "$ORG" "$LABELS"
     
