@@ -402,32 +402,6 @@ BUILDEOF"
     log "   - BuildKit: Habilitado"
 }
 
-execute_in_container() {
-    local ct_id="$1"
-    local command="$2"
-    local run_as_user="${3:-root}"
-    
-    log "   [@$ct_id] $command"
-    
-    # Método 1: Usar pct exec (requiere acceso directo al host de Proxmox)
-    # pct exec $ct_id -- bash -c "$command"
-    
-    # Método 2: Usar la API de Proxmox para ejecutar comandos
-    # Esto requiere que el contenedor tenga un servidor SSH o agente
-    
-    # Método 3: Usar SSH si está configurado
-    # ssh $run_as_user@<container-ip> "$command"
-    
-    # Por ahora, registramos el comando para ejecución manual
-    # En una implementación real, se debería usar SSH o la API de Proxmox
-    
-    log "   ⚠️  Comando registrado para ejecución en contenedor $ct_id"
-    log "   💡 Ejecutar manualmente: pct exec $ct_id -- bash -c '$command'"
-    
-    # Simular éxito para continuar con el script
-    return 0
-}
-
 get_github_runner_token() {
     local repo="$1"
     local org="$2"
