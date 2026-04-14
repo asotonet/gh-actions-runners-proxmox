@@ -258,21 +258,9 @@ if [[ "${EXEC_MODE:-local}" == "ssh" ]] && ! command -v sshpass >/dev/null 2>&1 
     echo ""
     echo "🔧 Configurando acceso SSH a Proxmox..."
     
-    # Intentar descargar sshpass
-    if [[ "$DETECTED_OS" == "windows" ]]; then
-        echo "   📥 Descargando sshpass para Windows..."
-        curl -sL "https://github.com/kevinburke/sshpass/releases/download/1.06/sshpass.exe" -o /usr/bin/sshpass.exe 2>/dev/null
-        if [[ -f /usr/bin/sshpass.exe ]]; then
-            chmod +x /usr/bin/sshpass.exe
-            echo "   ✅ sshpass instalado"
-        fi
-    fi
-    
-    # Si aún no está sshpass, generar clave SSH
-    if ! command -v sshpass >/dev/null 2>&1; then
-        echo "   💡 sshpass no disponible - generando clave SSH..."
-        generate_ssh_key_if_needed
-    fi
+    # Generar clave SSH y copiar a Proxmox
+    echo "   💡 Generando clave SSH para automatización..."
+    generate_ssh_key_if_needed
 fi
 
 # Configurar logging
