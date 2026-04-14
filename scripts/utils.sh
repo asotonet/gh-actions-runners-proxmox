@@ -47,6 +47,11 @@ execute_in_container() {
         -H "Authorization: PVEAuthCookie=$ticket" \
         -H "Content-Type: application/x-www-form-urlencoded" 2>/dev/null)
     
+    # Debug: mostrar respuesta cruda si falla
+    if ! echo "$exec_response" | grep -qi '"data"'; then
+        log_debug "API raw response: ${exec_response:0:500}"
+    fi
+    
     # Verificar respuesta
     if echo "$exec_response" | grep -qi '"data"'; then
         # Extraer output de la respuesta
@@ -62,7 +67,9 @@ execute_in_container() {
         local error_msg
         error_msg=$(echo "$exec_response" | grep -o '"message":"[^"]*"' | sed 's/"message":"//;s/"$//' | head -1)
         if [[ -n "$error_msg" ]]; then
-            log "   ⚠️  $error_msg"
+            log "   ❌ Error API: $error_msg"
+        else
+            log "   ❌ Error: ${exec_response:0:200}"
         fi
         return 1
     fi
