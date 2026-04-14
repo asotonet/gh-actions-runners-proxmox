@@ -230,8 +230,6 @@ SCRIPTEOF
     create_params+="&cdrom=${VM_ISO_STORAGE}:iso/${VM_ISO}"
     create_params+="&ide0=${VM_STORAGE}:cloudinit"
     create_params+="&net0=virtio=BC:24:11:02:02:02,bridge=vmbr0"
-    # Forzar boot desde CD-ROM con QEMU args
-    create_params+="&args=-boot order=d"
 
     local response
     response=$(proxmox_api_request "/nodes/$PROXMOX_NODE/qemu" "$create_params" "POST")
@@ -258,7 +256,9 @@ SCRIPTEOF
 
     # Configurar boot order para que lea CD-ROM primero
     log "Configurando boot order..."
-    proxmox_api_request "/nodes/$PROXMOX_NODE/qemu/$vm_id/config" "boot=order=ide2;scsi0" "PUT" >/dev/null 2>&1
+    local boot_resp
+    boot_resp=$(proxmox_api_request "/nodes/$PROXMOX_NODE/qemu/$vm_id/config" "boot=order=ide2" "PUT")
+    sleep 2
 
     # Verificar configuracion
     log "Verificando configuracion..."
