@@ -16,22 +16,18 @@ build_ssh_cmd() {
     local ssh_host="${PROXMOX_SSH_HOST:-$PROXMOX_HOST}"
     local ssh_port="${PROXMOX_SSH_PORT:-22}"
     
-    local ssh_opts="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+    local ssh_opts="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
     ssh_opts+=" -p $ssh_port"
     
+    # Usar clave SSH si está configurada
     if [[ -n "${PROXMOX_SSH_KEY:-}" ]]; then
         ssh_opts+=" -i $PROXMOX_SSH_KEY"
     fi
     
-    if [[ -n "${PROXMOX_SSH_PASSWORD:-}" ]]; then
-        # Usar sshpass si está disponible
-        if command -v sshpass >/dev/null 2>&1; then
-            echo "sshpass -p '$PROXMOX_SSH_PASSWORD' ssh $ssh_opts ${ssh_user}@${ssh_host} '$cmd'"
-        else
-            log_error "sshpass no está instalado. Instalar: apt install sshpass"
-            return 1
-        fi
+    if [[ -n "${PROXMOX_SSH_PASSWORD:-}" ]] && command -v sshpass >/dev/null 2>&1; then
+        echo "sshpass -p '$PROXMOX_SSH_PASSWORD' ssh $ssh_opts ${ssh_user}@${ssh_host} '$cmd'"
     else
+        # SSH directo con clave (sin sshpass)
         echo "ssh $ssh_opts ${ssh_user}@${ssh_host} '$cmd'"
     fi
 }

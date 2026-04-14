@@ -73,7 +73,36 @@ generate_ssh_key_if_needed() {
     local pub_key_content
     pub_key_content=$(cat "$ssh_pub_key")
     
-    # Intentar copiar vía API de Proxmox o SSH
+    # Intentar copiar vía API de Proxmox (usando el ticket de autenticación)
+    echo "   🔑 Obteniendo ticket de autenticación de Proxmox..."
+    local ticket_response
+    ticket_response=$(curl -s -k -X POST \
+        "https://${PROXMOX_HOST}:${PROXMOX_PORT}/api2/json/access/ticket" \
+        -d "username=${PROXMOX_USER}&password=${PROXMOX_PASSWORD}" 2>/dev/null)
+    
+    local ticket
+    ticket=$(echo "$ticket_response" | grep -o '"ticket":"[^"]*"' | sed 's/"ticket":"//;s/"//')
+    
+    if [[ -n "$ticket" ]]; then
+        echo "   ✅ Ticket obtenido, copiando clave SSH..."
+        
+        # Ejecutar comando remoto vía API de Proxmox
+        local ssh_cmd="mkdir -p ~/.ssh && grep -qF '$pub_key_content' ~/.ssh/authorized_keys || echo '$pub_key_content' >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"
+        
+        local exec_response
+        exec_response=$(curl -s -k -X POST \
+            "https://${PROXMOX_HOST}:${PROXMOX_PORT}/api2/json/nodes/${PROXMOX_NODE}/exec" \
+            -d "command=bash&args=-c&args=$ssh_cmd" \
+            -H "Authorization: PVEAuthCookie=$ticket" 2>/dev/null)
+        
+        if echo "$exec_response" | grep -qi '"data"'; then
+            echo "   ✅ Clave SSH copiada a Proxmox exitosamente"
+            PROXMOX_SSH_KEY="$ssh_key_file"
+            return 0
+        fi
+    fi
+    
+    # Fallback: intentar copiar vía SSH con password si sshpass está disponible
     if command -v sshpass >/dev/null 2>&1 && [[ -n "${PROXMOX_SSH_PASSWORD:-}" ]]; then
         sshpass -p "$PROXMOX_SSH_PASSWORD" ssh -o StrictHostKeyChecking=no -p "$ssh_port" "$ssh_user@$ssh_host" "mkdir -p ~/.ssh && echo '$pub_key_content' >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys" 2>/dev/null
         if [[ $? -eq 0 ]]; then
@@ -83,16 +112,23 @@ generate_ssh_key_if_needed() {
         fi
     fi
     
+    # Si todo falla, mostrar instrucciones manuales
     echo "   ⚠️  No se pudo copiar automáticamente la clave SSH"
-    echo "   💡 Copia manualmente la clave pública a Proxmox:"
-    echo "   cat $ssh_pub_key"
     echo ""
-    echo "   Y en Proxmox ejecuta:"
+    echo "   📋 Copia esta clave pública a Proxmox:"
+    echo "   ─────────────────────────────────────"
+    cat "$ssh_pub_key"
+    echo ""
+    echo "   ─────────────────────────────────────"
+    echo ""
+    echo "   En Proxmox, ejecuta:"
     echo "   echo '$pub_key_content' >> ~/.ssh/authorized_keys"
     echo ""
-    echo "   Luego configura en config.env:"
-    echo "   PROXMOX_SSH_KEY=\"$ssh_key_file\""
-    return 1
+    echo "   Luego presiona ENTER para continuar..."
+    read -r
+    
+    PROXMOX_SSH_KEY="$ssh_key_file"
+    return 0
 }
 
 # Instalar dependencias automáticamente
