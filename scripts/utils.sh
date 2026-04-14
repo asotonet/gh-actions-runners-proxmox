@@ -37,26 +37,30 @@ execute_in_container() {
     fi
     
     # Ejecutar vía API de Proxmox: POST /nodes/{node}/lxc/{vmid}/exec
+    # Formato correcto: args como array indexado
     local exec_response
     exec_response=$(curl -s -k -X POST \
         "https://${PROXMOX_HOST}:${PROXMOX_PORT}/api2/json/nodes/${PROXMOX_NODE}/lxc/${ct_id}/exec" \
-        -d "command=bash" \
-        -d "args=-c" \
-        -d "args=$full_cmd" \
+        --data-urlencode "command=bash" \
+        --data-urlencode "args[0]=-c" \
+        --data-urlencode "args[1]=$full_cmd" \
         -H "Authorization: PVEAuthCookie=$ticket" \
         -H "Content-Type: application/x-www-form-urlencoded" 2>/dev/null)
     
     # Verificar respuesta
     if echo "$exec_response" | grep -qi '"data"'; then
+        # Extraer output de la respuesta
         local output
-        output=$(echo "$exec_response" | grep -o '"out":"[^"]*"' | sed 's/"out":"//;s/"$//')
-        if [[ -n "$output" ]]; then
+        output=$(echo "$exec_response" | grep -o '"out":"[^"]*"' | sed 's/"out":"//;s/"$//' | head -1)
+        if [[ -n "$output" && "$output" != "null" ]]; then
+            # Decodificar caracteres escapados
+            output=$(echo "$output" | sed 's/\\n/\n/g; s/\\t/\t/g')
             log "   📤 $output"
         fi
         return 0
     else
         local error_msg
-        error_msg=$(echo "$exec_response" | grep -o '"message":"[^"]*"' | sed 's/"message":"//;s/"$//')
+        error_msg=$(echo "$exec_response" | grep -o '"message":"[^"]*"' | sed 's/"message":"//;s/"$//' | head -1)
         if [[ -n "$error_msg" ]]; then
             log "   ⚠️  $error_msg"
         fi
