@@ -223,14 +223,14 @@ SCRIPTEOF
     create_params+="&cores=${cores}"
     create_params+="&ostype=l26"
     create_params+="&machine=q35"
-    create_params+="&cpu=cputype=host"
+    create_params+="&cputype=host"
     create_params+="&agent=1"
     create_params+="&scsihw=virtio-scsi-pci"
     create_params+="&scsi0=${VM_STORAGE}:${disk}"
-    create_params+="&ide2=${VM_ISO_STORAGE}:iso/${VM_ISO},media=cdrom,size=4M"
+    create_params+="&cdrom=${VM_ISO_STORAGE}:iso/${VM_ISO}"
     create_params+="&ide0=${VM_STORAGE}:cloudinit"
-    create_params+="&boot=order=ide2;scsi0"
-    create_params+="&net0=virtio,bridge=vmbr0,firewall=0"
+    create_params+="&boot=order=scsi0;ide2"
+    create_params+="&net0=model=virtio,bridge=vmbr0"
 
     local response
     response=$(proxmox_api_request "/nodes/$PROXMOX_NODE/qemu" "$create_params" "POST")
