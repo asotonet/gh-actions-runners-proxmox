@@ -156,9 +156,8 @@ create_lxc_with_cloudinit() {
     local org="$5"
     local labels="$6"
     local token="$7"
-    local ssh_pub_key="$8"
 
-    log "🔧 Creando contenedor LXC $ct_id ($ct_name) con cloud-init..."
+    log "🔧 Creando contenedor LXC $ct_id ($ct_name)..."
 
     # Configuración del contenedor
     local memory="${LXC_MEMORY:-4096}"
@@ -168,7 +167,6 @@ create_lxc_with_cloudinit() {
     local nesting="${LXC_NESTING:-1}"
     local keyctl="${LXC_KEYCTL:-1}"
     
-    # IMPORTANTE: ostemplate con formato STORAGE:vztmpl/ARCHIVO
     local ostemplate_param
     if echo "$LXC_TEMPLATE" | grep -q ":"; then
         ostemplate_param="$LXC_TEMPLATE"
@@ -179,7 +177,6 @@ create_lxc_with_cloudinit() {
     local features_encoded="nesting%3D${nesting}%2Ckeyctl%3D${keyctl}"
     local net0_encoded="name%3Deth0%2Cbridge%3Dvmbr0%2Cip%3Ddhcp"
     
-    # Determinar URL de GitHub
     local github_url
     if [[ -n "$repo" ]]; then
         github_url="https://github.com/$repo"
@@ -187,7 +184,6 @@ create_lxc_with_cloudinit() {
         github_url="https://github.com/$org"
     fi
     
-    # Obtener versión del runner
     local runner_version="${RUNNER_VERSION:-latest}"
     if [[ "$runner_version" == "latest" ]]; then
         runner_version=$(curl -s "https://api.github.com/repos/actions/runner/releases/latest" | grep -o '"tag_name":"[^"]*"' | sed 's/"tag_name":"//;s/"$//' | sed 's/^v//')
@@ -195,20 +191,19 @@ create_lxc_with_cloudinit() {
     local download_url="https://github.com/actions/runner/releases/download/v${runner_version}/actions-runner-linux-x64-${runner_version}.tar.gz"
 
     # Crear script de inicialización
-    local init_script='#!/bin/bash
+    cat > "$ROOT_DIR/logs/init-runner-${ct_id}.sh" << 'SCRIPTEOF'
+#!/bin/bash
 set -e
-
-# Variables (reemplazadas por el script principal)
-RUNNER_USER='"'"'${RUNNER_USER}'"'"'
-RUNNER_NAME='"'"'${runner_name}'"'"'
-GITHUB_URL='"'"'${github_url}'"'"'
-RUNNER_TOKEN='"'"'${token}'"'"'
-LABELS='"'"'${labels}'"'"'
-RUNNER_DIR="/home/${RUNNER_USER}/actions-runner"
-DOWNLOAD_URL='"'"'${download_url}'"'"'
-
-# Crear log
 exec > >(tee /var/log/runner-setup.log) 2>&1
+
+RUNNER_USER='${RUNNER_USER}'
+RUNNER_NAME='${runner_name}'
+GITHUB_URL='${github_url}'
+RUNNER_TOKEN='${token}'
+LABELS='${labels}'
+RUNNER_DIR="/home/${RUNNER_USER}/actions-runner"
+DOWNLOAD_URL='${download_url}'
+
 echo "=== Iniciando configuración del runner ==="
 
 # 1. Paquetes esenciales
@@ -229,13 +224,13 @@ apt-get install -y -qq docker-ce docker-ce-cli containerd.io docker-buildx-plugi
 echo "[3/6] Configurando Docker..."
 mkdir -p /etc/systemd/system/docker.service.d /etc/docker /var/lib/docker /tmp/docker-builds
 
-cat > /etc/systemd/system/docker.service.d/override.conf << '"'"'DEOF'"'"'
+cat > /etc/systemd/system/docker.service.d/override.conf << 'DEOF'
 [Service]
 ExecStart=
 ExecStart=/usr/bin/dockerd -H fd:// --containerd=/run/containerd/containerd.sock --exec-opt native.cgroupdriver=cgroupfs
 DEOF
 
-cat > /etc/docker/daemon.json << '"'"'DEOF'"'"'
+cat > /etc/docker/daemon.json << 'DEOF'
 {
   "storage-driver": "overlay2",
   "data-root": "/var/lib/docker",
@@ -272,8 +267,8 @@ mkdir -p "$RUNNER_DIR" "$RUNNER_DIR/_work"
 chown ${RUNNER_USER}:${RUNNER_USER} "$RUNNER_DIR" "$RUNNER_DIR/_work"
 chmod 755 "$RUNNER_DIR/_work"
 
-su - "$RUNNER_USER" -c "cd $RUNNER_DIR && curl -sL '"'"'$DOWNLOAD_URL'"'"' -o actions-runner.tar.gz && tar xzf actions-runner.tar.gz && rm actions-runner.tar.gz"
-su - "$RUNNER_USER" -c "cd $RUNNER_DIR && ./config.sh --unattended --url '"'"'$GITHUB_URL'"'"' --token '"'"'$RUNNER_TOKEN'"'"' --name '"'"'$RUNNER_NAME'"'"' --labels '"'"'$LABELS'"'"' --work '"'"'_work'"'"'"
+su - "$RUNNER_USER" -c "cd $RUNNER_DIR && curl -sL '$DOWNLOAD_URL' -o actions-runner.tar.gz && tar xzf actions-runner.tar.gz && rm actions-runner.tar.gz"
+su - "$RUNNER_USER" -c "cd $RUNNER_DIR && ./config.sh --unattended --url '$GITHUB_URL' --token '$RUNNER_TOKEN' --name '$RUNNER_NAME' --labels '$LABELS' --work '_work'"
 
 cd "$RUNNER_DIR" && ./svc.sh install "$RUNNER_USER"
 cd "$RUNNER_DIR" && ./svc.sh start
@@ -288,14 +283,11 @@ echo "[6/6] Verificando..."
 docker run --rm hello-world 2>&1 | head -3 || true
 docker --version
 echo "=== Configuración completada ==="
-'
-
-    # Guardar script para referencia
-    echo "$init_script" > "$ROOT_DIR/logs/init-runner-${ct_id}.sh"
+SCRIPTEOF
     chmod +x "$ROOT_DIR/logs/init-runner-${ct_id}.sh"
     log "💾 Script guardado: logs/init-runner-${ct_id}.sh"
 
-    # Crear contenedor con cloud-init
+    # Parámetros de creación (sin cloud-init)
     local create_params="vmid=${ct_id}"
     create_params+="&hostname=${ct_name}"
     create_params+="&storage=${LXC_STORAGE}"
@@ -306,10 +298,6 @@ echo "=== Configuración completada ==="
     create_params+="&unprivileged=${unprivileged}"
     create_params+="&features=${features_encoded}"
     create_params+="&net0=${net0_encoded}"
-    # Cloud-init: usuario root con contraseña
-    create_params+="&ciuser=root"
-    create_params+="&cipassword=RunnerSetup2024!"
-    create_params+="&sshkeys=$(echo "$ssh_pub_key" | sed 's/+/%2B/g; s/=/%3D/g; s/\//%2F/g')"
     create_params+="&onboot=1"
     create_params+="&start=1"
 
@@ -333,91 +321,54 @@ echo "=== Configuración completada ==="
     response=$(proxmox_api_request "/nodes/$PROXMOX_NODE/lxc/$ct_id/config" "$config_params" "PUT")
 
     if echo "$response" | grep -qi '"data"'; then
-        log "✅ lxc.apparmor.profile: unconfined - Aplicado"
-        log "✅ lxc.cap.drop: - Aplicado"
-        log "✅ lxc.cgroup2.devices.allow: a - Aplicado"
+        log "✅ AppArmor y capacidades aplicadas"
     fi
 
     log "✅ Contenedor LXC creado: $ct_id"
-    log "🔄 Reiniciando para aplicar cloud-init..."
+    log "🔄 Reiniciando..."
     proxmox_api_request "/nodes/$PROXMOX_NODE/lxc/$ct_id/status/stop" "" "POST" >/dev/null 2>&1
     sleep 5
     proxmox_api_request "/nodes/$PROXMOX_NODE/lxc/$ct_id/status/start" "" "POST" >/dev/null 2>&1
     sleep 15
 
-    # Esperar SSH
-    log "⏳ Esperando acceso SSH..."
-    local container_ip
-    container_ip=$(wait_for_container_ip "$ct_id")
+    # Ejecutar script vía SSH al host de Proxmox
+    log "🚀 Ejecutando configuración automática..."
     
-    if [[ -n "$container_ip" ]]; then
-        log "📡 IP del contenedor: $container_ip"
-        wait_for_ssh "$container_ip" 120
-        
-        # Copiar y ejecutar script vía SSH
-        log "🚀 Ejecutando script de configuración..."
-        scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-            -i "${PROXMOX_SSH_KEY:-$HOME/.ssh/id_ed25519}" \
+    local ssh_user="${PROXMOX_SSH_USER:-root}"
+    local ssh_host="${PROXMOX_SSH_HOST:-$PROXMOX_HOST}"
+    local ssh_port="${PROXMOX_SSH_PORT:-22}"
+    local ssh_opts="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -p $ssh_port"
+    
+    # Copiar script al host de Proxmox
+    log "📤 Subiendo script al host de Proxmox..."
+    if command -v sshpass >/dev/null 2>&1 && [[ -n "${PROXMOX_SSH_PASSWORD:-}" ]]; then
+        sshpass -p "$PROXMOX_SSH_PASSWORD" scp $ssh_opts \
             "$ROOT_DIR/logs/init-runner-${ct_id}.sh" \
-            "root@${container_ip}:/opt/setup-runner.sh" 2>/dev/null || true
-        
-        ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-            -i "${PROXMOX_SSH_KEY:-$HOME/.ssh/id_ed25519}" \
-            "root@${container_ip}" \
-            "bash /opt/setup-runner.sh" 2>&1 | while read -r line; do
+            "${ssh_user}@${ssh_host}:/tmp/setup-runner.sh" 2>/dev/null
+    else
+        scp $ssh_opts \
+            "$ROOT_DIR/logs/init-runner-${ct_id}.sh" \
+            "${ssh_user}@${ssh_host}:/tmp/setup-runner.sh" 2>/dev/null
+    fi
+    
+    # Ejecutar script dentro del contenedor
+    log "⚙️  Ejecutando configuración en el contenedor..."
+    if command -v sshpass >/dev/null 2>&1 && [[ -n "${PROXMOX_SSH_PASSWORD:-}" ]]; then
+        sshpass -p "$PROXMOX_SSH_PASSWORD" ssh $ssh_opts \
+            "${ssh_user}@${ssh_host}" \
+            "pct push $ct_id /tmp/setup-runner.sh /opt/setup-runner.sh && pct exec $ct_id -- bash /opt/setup-runner.sh" 2>&1 | while read -r line; do
             log "   📤 $line"
         done
     else
-        log "⚠️  No se pudo obtener IP del contenedor"
-        log "💡 Ejecuta manualmente:"
-        log "   pct exec $ct_id -- bash /opt/setup-runner.sh"
+        ssh $ssh_opts \
+            "${ssh_user}@${ssh_host}" \
+            "pct push $ct_id /tmp/setup-runner.sh /opt/setup-runner.sh && pct exec $ct_id -- bash /opt/setup-runner.sh" 2>&1 | while read -r line; do
+            log "   📤 $line"
+        done
     fi
 
+    log "✅ Configuración del runner $ct_id completada"
     echo "$ct_id"
-}
-
-wait_for_container_ip() {
-    local ct_id="$1"
-    local max_wait=60
-    local elapsed=0
-    
-    while [[ $elapsed -lt $max_wait ]]; do
-        local response
-        response=$(proxmox_api_request "/nodes/$PROXMOX_NODE/lxc/$ct_id/interfaces" "" "GET")
-        
-        local ip
-        ip=$(echo "$response" | grep -o '"ip":"[0-9.]*"' | head -1 | cut -d: -f2 | tr -d '"')
-        
-        if [[ -n "$ip" && "$ip" != "127.0.0.1" ]]; then
-            echo "$ip"
-            return 0
-        fi
-        
-        sleep 5
-        elapsed=$((elapsed + 5))
-    done
-    
-    return 1
-}
-
-wait_for_ssh() {
-    local host="$1"
-    local max_wait="${2:-60}"
-    local elapsed=0
-    
-    local key_file="${PROXMOX_SSH_KEY:-$HOME/.ssh/id_ed25519}"
-    
-    while [[ $elapsed -lt $max_wait ]]; do
-        if ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
-            -o ConnectTimeout=5 -i "$key_file" \
-            "root@${host}" "echo SSH_OK" >/dev/null 2>&1; then
-            return 0
-        fi
-        sleep 3
-        elapsed=$((elapsed + 3))
-    done
-    
-    return 1
 }
 
 ###############################################################################
@@ -514,18 +465,11 @@ main() {
         exit 1
     fi
     
-    # Setup SSH
-    local ssh_key_file
-    ssh_key_file=$(setup_ssh_access)
-    
     local runner_name_with_id="runner-${CT_ID}"
     log "📝 Nombre del runner: $runner_name_with_id"
     
-    # Crear contenedor con cloud-init
-    local ssh_pub_key
-    ssh_pub_key=$(cat "${ssh_key_file}.pub")
-    
-    create_lxc_with_cloudinit "$CT_ID" "runner-${runner_name_with_id}" "$runner_name_with_id" "$repo_or_org" "$ORG" "$LABELS" "$token" "$ssh_pub_key"
+    # Crear contenedor y configurar
+    create_lxc_with_cloudinit "$CT_ID" "runner-${runner_name_with_id}" "$runner_name_with_id" "$repo_or_org" "$ORG" "$LABELS" "$token"
     
     log "================================================"
     log "✅ Runner '$runner_name_with_id' configurado"
