@@ -246,12 +246,21 @@ SCRIPTEOF
     # Aplicar cloud-init settings
     local ci_params="ciuser=${RUNNER_USER}"
     ci_params+="&cipassword=RunnerSetup2024!"
+    ci_params+="&nameserver=8.8.8.8"
 
     response=$(proxmox_api_request "/nodes/$PROXMOX_NODE/qemu/$vm_id/config" "$ci_params" "PUT")
 
-    # Generar cloud-init ISO
+    # Regenerar cloud-init ISO
     log "Generando cloud-init ISO..."
-    proxmox_api_request "/nodes/$PROXMOX_NODE/qemu/$vm_id/cloudinit" "" "GET" >/dev/null 2>&1
+    proxmox_api_request "/nodes/$PROXMOX_NODE/qemu/$vm_id/cloudinit" "" "POST" >/dev/null 2>&1
+
+    # Configurar boot order para que lea CD-ROM primero
+    log "Configurando boot order..."
+    proxmox_api_request "/nodes/$PROXMOX_NODE/qemu/$vm_id/config" "boot=order=ide2;scsi0" "PUT" >/dev/null 2>&1
+
+    # Verificar configuracion
+    log "Verificando configuracion..."
+    proxmox_api_request "/nodes/$PROXMOX_NODE/qemu/$vm_id/config" "" "GET"
 
     # Iniciar VM
     log "Iniciando VM (instalacion automatica: 15-20 min)..."
