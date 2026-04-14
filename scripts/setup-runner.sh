@@ -230,6 +230,8 @@ SCRIPTEOF
     create_params+="&cdrom=${VM_ISO_STORAGE}:iso/${VM_ISO}"
     create_params+="&ide0=${VM_STORAGE}:cloudinit"
     create_params+="&net0=virtio=BC:24:11:02:02:02,bridge=vmbr0"
+    # Forzar boot desde CD-ROM con QEMU args
+    create_params+="&args=-boot order=d"
 
     local response
     response=$(proxmox_api_request "/nodes/$PROXMOX_NODE/qemu" "$create_params" "POST")
@@ -266,7 +268,8 @@ SCRIPTEOF
     log "Iniciando VM (instalacion automatica: 15-20 min)..."
     proxmox_api_request "/nodes/$PROXMOX_NODE/qemu/$vm_id/status/start" "" "POST" >/dev/null 2>&1
 
-    # Esperar instalacion
+    # Esperar a que Ubuntu termine de instalarse
+    log "Esperando instalacion de Ubuntu (15-20 min)..."
     local max_wait=1800
     local elapsed=0
 
@@ -275,7 +278,7 @@ SCRIPTEOF
         status=$(proxmox_api_request "/nodes/$PROXMOX_NODE/qemu/$vm_id/status/current" "" "GET" 2>/dev/null)
 
         if echo "$status" | grep -q '"running"'; then
-            # Verificar qemu agent
+            # Verificar qemu agent (indica que Ubuntu esta listo)
             local agent_resp
             agent_resp=$(proxmox_api_request "/nodes/$PROXMOX_NODE/qemu/$vm_id/agent/ping" "" "GET" 2>/dev/null)
             if echo "$agent_resp" | grep -qi '"data"'; then
@@ -292,18 +295,50 @@ SCRIPTEOF
         elapsed=$((elapsed + 10))
     done
 
-    # Ejecutar script de configuracion
+    # Configurar runner via QEMU agent exec
     log "Configurando runner..."
     local runcmd_script
     runcmd_script=$(cat "$ROOT_DIR/logs/cloudinit-runcmd-${vm_id}.sh")
 
-    if exec_in_lxc "$vm_id" "echo iniciando" 2>/dev/null; then
-        exec_in_lxc "$vm_id" "$runcmd_script" 600
-        log "Configuracion enviada al contenedor"
-    else
-        log "API exec no disponible - ejecutar manualmente:"
-        log "  pct push $vm_id $ROOT_DIR/logs/cloudinit-runcmd-${vm_id}.sh /opt/setup-runner.sh"
-        log "  pct exec $vm_id -- bash /opt/setup-runner.sh"
+    # Usar QEMU agent exec directamente
+    local ticket
+    ticket=$(get_proxmox_ticket)
+    local csrf
+    csrf=$(get_proxmox_csrf)
+
+    if [[ -n "$ticket" && -n "$csrf" ]]; then
+        local agent_url="https://${PROXMOX_HOST}:${PROXMOX_PORT}/api2/json/nodes/${PROXMOX_NODE}/qemu/${vm_id}/agent/exec"
+        # Test first
+        local test_resp
+        test_resp=$(curl -s -k -X POST "$agent_url" \
+            --data-urlencode "command=bash" \
+            --data-urlencode "args[0]=-c" \
+            --data-urlencode "args[1]=echo test" \
+            -H "Authorization: PVEAuthCookie=$ticket" \
+            -H "CSRFPreventionToken: $csrf" \
+            -H "Content-Type: application/x-www-form-urlencoded" 2>/dev/null)
+
+        if echo "$test_resp" | grep -qi '"data"'; then
+            log "QEMU agent disponible - ejecutando configuracion..."
+            # Encode the script properly
+            local encoded_script
+            encoded_script=$(echo "$runcmd_script" | base64 -w 0 2>/dev/null || echo "$runcmd_script" | base64 | tr -d '\n')
+            
+            # Execute via agent: decode and run
+            curl -s -k -X POST "$agent_url" \
+                --data-urlencode "command=bash" \
+                --data-urlencode "args[0]=-c" \
+                --data-urlencode "args[1]=echo '$encoded_script' | base64 -d | bash" \
+                -H "Authorization: PVEAuthCookie=$ticket" \
+                -H "CSRFPreventionToken: $csrf" \
+                -H "Content-Type: application/x-www-form-urlencoded" >/dev/null 2>&1
+
+            log "Configuracion enviada al runner"
+        else
+            log "QEMU agent no disponible - ejecutar manualmente:"
+            log "  pct push $vm_id $ROOT_DIR/logs/cloudinit-runcmd-${vm_id}.sh /opt/setup-runner.sh"
+            log "  pct exec $vm_id -- bash /opt/setup-runner.sh"
+        fi
     fi
 
     log "VM QEMU creada: $vm_id"
