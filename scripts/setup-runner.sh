@@ -331,43 +331,23 @@ SCRIPTEOF
     proxmox_api_request "/nodes/$PROXMOX_NODE/lxc/$ct_id/status/start" "" "POST" >/dev/null 2>&1
     sleep 15
 
-    # Ejecutar script vía SSH al host de Proxmox
-    log "🚀 Ejecutando configuración automática..."
+    log "✅ Contenedor listo"
+    log ""
+    log "════════════════════════════════════════════════"
+    log "📋 Para completar la configuración del runner,"
+    log "   ejecuta este comando en el host de Proxmox:"
+    log "════════════════════════════════════════════════"
+    log ""
+    log "   pct push $ct_id $ROOT_DIR/logs/init-runner-${ct_id}.sh /opt/setup-runner.sh"
+    log "   pct exec $ct_id -- bash /opt/setup-runner.sh"
+    log ""
+    log "════════════════════════════════════════════════"
+    log ""
+    log "💡 Para verificar el progreso:"
+    log "   pct exec $ct_id -- tail -f /var/log/runner-setup.log"
+    log ""
+    log "📝 El script de init está en: $ROOT_DIR/logs/init-runner-${ct_id}.sh"
     
-    local ssh_user="${PROXMOX_SSH_USER:-root}"
-    local ssh_host="${PROXMOX_SSH_HOST:-$PROXMOX_HOST}"
-    local ssh_port="${PROXMOX_SSH_PORT:-22}"
-    local ssh_opts="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -p $ssh_port"
-    
-    # Copiar script al host de Proxmox
-    log "📤 Subiendo script al host de Proxmox..."
-    if command -v sshpass >/dev/null 2>&1 && [[ -n "${PROXMOX_SSH_PASSWORD:-}" ]]; then
-        sshpass -p "$PROXMOX_SSH_PASSWORD" scp $ssh_opts \
-            "$ROOT_DIR/logs/init-runner-${ct_id}.sh" \
-            "${ssh_user}@${ssh_host}:/tmp/setup-runner.sh" 2>/dev/null
-    else
-        scp $ssh_opts \
-            "$ROOT_DIR/logs/init-runner-${ct_id}.sh" \
-            "${ssh_user}@${ssh_host}:/tmp/setup-runner.sh" 2>/dev/null
-    fi
-    
-    # Ejecutar script dentro del contenedor
-    log "⚙️  Ejecutando configuración en el contenedor..."
-    if command -v sshpass >/dev/null 2>&1 && [[ -n "${PROXMOX_SSH_PASSWORD:-}" ]]; then
-        sshpass -p "$PROXMOX_SSH_PASSWORD" ssh $ssh_opts \
-            "${ssh_user}@${ssh_host}" \
-            "pct push $ct_id /tmp/setup-runner.sh /opt/setup-runner.sh && pct exec $ct_id -- bash /opt/setup-runner.sh" 2>&1 | while read -r line; do
-            log "   📤 $line"
-        done
-    else
-        ssh $ssh_opts \
-            "${ssh_user}@${ssh_host}" \
-            "pct push $ct_id /tmp/setup-runner.sh /opt/setup-runner.sh && pct exec $ct_id -- bash /opt/setup-runner.sh" 2>&1 | while read -r line; do
-            log "   📤 $line"
-        done
-    fi
-
-    log "✅ Configuración del runner $ct_id completada"
     echo "$ct_id"
 }
 
