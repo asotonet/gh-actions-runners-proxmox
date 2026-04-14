@@ -297,6 +297,50 @@ proxmox_api_request() {
     echo "$response"
 }
 
+# Ejecutar comando en contenedor LXC via API
+exec_in_lxc() {
+    local ct_id="$1"
+    local command="$2"
+    local timeout="${3:-300}"
+    
+    local ticket
+    ticket=$(get_proxmox_ticket)
+    
+    if [[ $? -ne 0 || -z "$ticket" ]]; then
+        log_error "No se pudo obtener ticket para exec"
+        return 1
+    fi
+    
+    local csrf
+    csrf=$(get_proxmox_csrf)
+    
+    local url="https://${PROXMOX_HOST}:${PROXMOX_PORT}/api2/json/nodes/${PROXMOX_NODE}/lxc/${ct_id}/exec"
+    
+    # Probar con el formato correcto del endpoint
+    local response
+    response=$(curl -s -k -w "\nHTTP_CODE:%{http_code}" \
+        -X POST \
+        "$url" \
+        --data-urlencode "command=bash" \
+        --data-urlencode "args[0]=-c" \
+        --data-urlencode "args[1]=$command" \
+        --data-urlencode "timeout=$timeout" \
+        -H "Authorization: PVEAuthCookie=$ticket" \
+        -H "CSRFPreventionToken: $csrf" \
+        -H "Content-Type: application/x-www-form-urlencoded" 2>/dev/null)
+    
+    local http_code
+    http_code=$(echo "$response" | grep "HTTP_CODE:" | sed 's/HTTP_CODE://')
+    response=$(echo "$response" | sed '$d')
+    
+    if [[ "$http_code" == "200" ]] && echo "$response" | grep -qi '"data"'; then
+        return 0
+    else
+        log "   ❌ Exec API HTTP $http_code - ${response:0:200}"
+        return 1
+    fi
+}
+
 # ==============================================================================
 # Funciones de gestión de contenedores LXC
 # ==============================================================================

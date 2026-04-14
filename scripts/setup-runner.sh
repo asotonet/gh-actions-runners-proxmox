@@ -331,20 +331,41 @@ SCRIPTEOF
     proxmox_api_request "/nodes/$PROXMOX_NODE/lxc/$ct_id/status/start" "" "POST" >/dev/null 2>&1
     sleep 15
 
-    log "✅ Contenedor listo"
-    log ""
-    log "════════════════════════════════════════════════"
-    log "📋 Para completar la configuración del runner,"
-    log "   ejecuta este comando en el host de Proxmox:"
-    log "════════════════════════════════════════════════"
-    log ""
-    log "   pct push $ct_id $ROOT_DIR/logs/init-runner-${ct_id}.sh /opt/setup-runner.sh"
-    log "   pct exec $ct_id -- bash /opt/setup-runner.sh"
-    log ""
-    log "════════════════════════════════════════════════"
-    log ""
-    log "💡 Para verificar el progreso:"
-    log "   pct exec $ct_id -- tail -f /var/log/runner-setup.log"
+    # Ejecutar script via API exec
+    log "🚀 Ejecutando configuración automática via API..."
+    
+    # Leer el script y ejecutarlo linea por linea via API
+    # Como el script es largo, lo dividimos en chunks
+    local init_script
+    init_script=$(cat "$ROOT_DIR/logs/init-runner-${ct_id}.sh")
+    
+    # Intentar ejecutar via API exec
+    if exec_in_lxc "$ct_id" "echo 'Iniciando configuración...'"; then
+        log "✅ API exec funcional - ejecutando configuración..."
+        
+        # Ejecutar el script completo
+        exec_in_lxc "$ct_id" "$init_script" 600
+        
+        log "✅ Configuración enviada al contenedor"
+        log "💡 Para verificar: pct exec $ct_id -- tail -f /var/log/runner-setup.log"
+    else
+        # API exec no disponible - mostrar instrucciones manuales
+        log "⚠️  API exec no disponible en este Proxmox"
+        log ""
+        log "════════════════════════════════════════════════"
+        log "📋 Para completar la configuración del runner,"
+        log "   ejecuta este comando en el host de Proxmox:"
+        log "════════════════════════════════════════════════"
+        log ""
+        log "   pct push $ct_id $ROOT_DIR/logs/init-runner-${ct_id}.sh /opt/setup-runner.sh"
+        log "   pct exec $ct_id -- bash /opt/setup-runner.sh"
+        log ""
+        log "════════════════════════════════════════════════"
+        log ""
+        log "💡 Para verificar el progreso:"
+        log "   pct exec $ct_id -- tail -f /var/log/runner-setup.log"
+    fi
+
     log ""
     log "📝 El script de init está en: $ROOT_DIR/logs/init-runner-${ct_id}.sh"
     
