@@ -5,7 +5,14 @@
       "Bash(git commit *)",
       "Bash(git *)",
       "Bash(true)",
-      "Bash(dir *)"
+      "Bash(dir *)",
+      "Bash(./scripts/setup-runner.sh *)",
+      "Bash(tee *)",
+      "Bash(curl *)",
+      "Bash(chmod *)",
+      "Bash(jq *)",
+      "Bash(ls *)",
+      "Bash(file *)"
     ]
   },
   "$version": 3

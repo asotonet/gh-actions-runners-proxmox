@@ -5,65 +5,10 @@
 ###############################################################################
 
 # ==============================================================================
-# Funciones de ejecución remota vía SSH
+# Funciones de ejecución remota vía API de Proxmox (sin SSH)
 # ==============================================================================
 
-# Construir comando SSH base
-build_ssh_cmd() {
-    local cmd="$1"
-    
-    local ssh_user="${PROXMOX_SSH_USER:-root}"
-    local ssh_host="${PROXMOX_SSH_HOST:-$PROXMOX_HOST}"
-    local ssh_port="${PROXMOX_SSH_PORT:-22}"
-    
-    local ssh_opts="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR"
-    ssh_opts+=" -p $ssh_port"
-    
-    # Usar clave SSH si está configurada
-    if [[ -n "${PROXMOX_SSH_KEY:-}" ]]; then
-        ssh_opts+=" -i $PROXMOX_SSH_KEY"
-    fi
-    
-    if [[ -n "${PROXMOX_SSH_PASSWORD:-}" ]] && command -v sshpass >/dev/null 2>&1; then
-        echo "sshpass -p '$PROXMOX_SSH_PASSWORD' ssh $ssh_opts ${ssh_user}@${ssh_host} '$cmd'"
-    else
-        # SSH directo con clave (sin sshpass)
-        echo "ssh $ssh_opts ${ssh_user}@${ssh_host} '$cmd'"
-    fi
-}
-
-# Ejecutar comando en el host de Proxmox vía SSH
-exec_on_proxmox_host() {
-    local cmd="$1"
-    
-    if [[ "${EXEC_MODE:-local}" == "ssh" ]]; then
-        local ssh_cmd
-        ssh_cmd=$(build_ssh_cmd "$cmd")
-        
-        if [[ $? -ne 0 ]]; then
-            return 1
-        fi
-        
-        log "   🔧 SSH> $cmd"
-        
-        local output
-        output=$(eval "$ssh_cmd" 2>&1)
-        local exit_code=$?
-        
-        if [[ -n "$output" ]]; then
-            log "   📤 $output"
-        fi
-        
-        return $exit_code
-    else
-        # Ejecución local (desde el host de Proxmox)
-        log "   🔧 LOCAL> $cmd"
-        eval "$cmd" 2>&1
-        return $?
-    fi
-}
-
-# Ejecutar comando dentro de un contenedor LXC
+# Ejecutar comando dentro de un contenedor LXC vía API de Proxmox
 execute_in_container() {
     local ct_id="$1"
     local command="$2"
@@ -71,35 +16,93 @@ execute_in_container() {
     
     log "   [@$ct_id] $command"
     
-    local pct_cmd
-    if [[ "$run_as_user" == "root" ]]; then
-        pct_cmd="pct exec $ct_id -- bash -c '$command'"
-    else
-        pct_cmd="pct exec $ct_id -- sudo -u $run_as_user bash -c '$command'"
+    # Obtener ticket de autenticación
+    local ticket_response
+    ticket_response=$(curl -s -k -X POST \
+        "https://${PROXMOX_HOST}:${PROXMOX_PORT}/api2/json/access/ticket" \
+        -d "username=${PROXMOX_USER}&password=${PROXMOX_PASSWORD}" 2>/dev/null)
+    
+    local ticket
+    ticket=$(echo "$ticket_response" | grep -o '"ticket":"[^"]*"' | sed 's/"ticket":"//;s/"//')
+    
+    if [[ -z "$ticket" ]]; then
+        log_error "No se pudo obtener ticket para ejecutar comando en contenedor"
+        return 1
     fi
     
-    # Ejecutar vía SSH o localmente
-    if [[ "${EXEC_MODE:-local}" == "ssh" ]]; then
-        local ssh_cmd
-        ssh_cmd=$(build_ssh_cmd "$pct_cmd")
-        
-        if [[ $? -ne 0 ]]; then
-            return 1
-        fi
-        
+    # Construir comando con usuario si no es root
+    local full_cmd="$command"
+    if [[ "$run_as_user" != "root" ]]; then
+        full_cmd="su - $run_as_user -c '$command'"
+    fi
+    
+    # Ejecutar vía API de Proxmox: POST /nodes/{node}/lxc/{vmid}/exec
+    local exec_response
+    exec_response=$(curl -s -k -X POST \
+        "https://${PROXMOX_HOST}:${PROXMOX_PORT}/api2/json/nodes/${PROXMOX_NODE}/lxc/${ct_id}/exec" \
+        -d "command=bash" \
+        -d "args=-c" \
+        -d "args=$full_cmd" \
+        -H "Authorization: PVEAuthCookie=$ticket" \
+        -H "Content-Type: application/x-www-form-urlencoded" 2>/dev/null)
+    
+    # Verificar respuesta
+    if echo "$exec_response" | grep -qi '"data"'; then
         local output
-        output=$(eval "$ssh_cmd" 2>&1)
-        local exit_code=$?
-        
+        output=$(echo "$exec_response" | grep -o '"out":"[^"]*"' | sed 's/"out":"//;s/"$//')
         if [[ -n "$output" ]]; then
             log "   📤 $output"
         fi
-        
-        return $exit_code
+        return 0
     else
-        # Ejecución local
-        eval "$pct_cmd" 2>&1
-        return $?
+        local error_msg
+        error_msg=$(echo "$exec_response" | grep -o '"message":"[^"]*"' | sed 's/"message":"//;s/"$//')
+        if [[ -n "$error_msg" ]]; then
+            log "   ⚠️  $error_msg"
+        fi
+        return 1
+    fi
+}
+
+# Ejecutar comando en el host de Proxmox vía API
+exec_on_proxmox_host() {
+    local command="$1"
+    
+    log "   🔧 Proxmox Host> $command"
+    
+    # Obtener ticket
+    local ticket_response
+    ticket_response=$(curl -s -k -X POST \
+        "https://${PROXMOX_HOST}:${PROXMOX_PORT}/api2/json/access/ticket" \
+        -d "username=${PROXMOX_USER}&password=${PROXMOX_PASSWORD}" 2>/dev/null)
+    
+    local ticket
+    ticket=$(echo "$ticket_response" | grep -o '"ticket":"[^"]*"' | sed 's/"ticket":"//;s/"//')
+    
+    if [[ -z "$ticket" ]]; then
+        log_error "No se pudo obtener ticket para comando en host"
+        return 1
+    fi
+    
+    # Ejecutar vía API: POST /nodes/{node}/exec
+    local exec_response
+    exec_response=$(curl -s -k -X POST \
+        "https://${PROXMOX_HOST}:${PROXMOX_PORT}/api2/json/nodes/${PROXMOX_NODE}/exec" \
+        -d "command=bash" \
+        -d "args=-c" \
+        -d "args=$command" \
+        -H "Authorization: PVEAuthCookie=$ticket" \
+        -H "Content-Type: application/x-www-form-urlencoded" 2>/dev/null)
+    
+    if echo "$exec_response" | grep -qi '"data"'; then
+        return 0
+    else
+        local error_msg
+        error_msg=$(echo "$exec_response" | grep -o '"message":"[^"]*"' | sed 's/"message":"//;s/"$//')
+        if [[ -n "$error_msg" ]]; then
+            log "   ⚠️  $error_msg"
+        fi
+        return 1
     fi
 }
 

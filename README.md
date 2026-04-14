@@ -253,35 +253,7 @@ lxc.mount.entry: /dev/fuse dev/fuse none bind,create=file,optional 0 0
 
 El script `setup-runner.sh` aplica estas configuraciones automáticamente vía API de Proxmox y reinicia el contenedor.
 
-### 🔧 Automatización Remota vía SSH
-
-Para que el script ejecute todos los comandos automáticamente (crear usuario, instalar Docker, configurar runner), debes configurar el acceso SSH al host de Proxmox:
-
-**1. Configurar en `config/config.env`:**
-```bash
-EXEC_MODE="ssh"
-PROXMOX_SSH_USER="root"
-PROXMOX_SSH_HOST="192.168.1.100"
-PROXMOX_SSH_PORT="22"
-# Opcional: usar clave SSH
-PROXMOX_SSH_KEY="/path/to/private_key"
-# O usar password (requiere sshpass)
-PROXMOX_SSH_PASSWORD="tu_password"
-```
-
-**2. Instalar sshpass (si usas password):**
-```bash
-# Windows (Git Bash/MSYS2)
-pacman -S sshpass
-
-# Ubuntu/WSL
-sudo apt install sshpass
-```
-
-**3. Verificar conexión:**
-```bash
-ssh root@192.168.1.100
-```
+**No se requiere SSH** — todo se gestiona mediante la API REST de Proxmox con autenticación por ticket.
 
 ## 🤝 Contribuir
 
