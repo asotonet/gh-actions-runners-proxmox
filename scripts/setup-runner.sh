@@ -94,7 +94,7 @@ get_github_runner_token() {
     log "🔑 Solicitando nuevo token de registro para runner '$runner_name'..."
     
     local response
-    response=$(curl -s -X GET "$url" \
+    response=$(curl -s -X POST "$url" \
         -H "Accept: application/vnd.github+json" \
         -H "Authorization: Bearer $GITHUB_TOKEN" \
         -H "X-GitHub-Api-Version: 2022-11-28")
