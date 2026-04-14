@@ -1,9 +1,17 @@
 #!/bin/bash
 ###############################################################################
 # setup-runner.sh
-# Script para configurar un GitHub Actions runner en una VM QEMU ligera de Proxmox
-# Usa cloud-init para configuración automática 100% vía API
-# Recursos mínimos: 1 vCPU, 1024MB RAM, 16GB disco
+# Crea una VM QEMU en Proxmox con Ubuntu + Docker + GitHub Actions runner
+# Usa cloud-init para configuracion automatica via API
+#
+# NOTA: La VM necesita un template Ubuntu pre-instalado para funcionar.
+#       El cloud-init configura usuario, Docker y runner automaticamente.
+#
+# Para crear el template base:
+#   1. Crea una VM con Ubuntu Server 22.04
+#   2. Instala: cloud-init qemu-guest-agent
+#   3. Habilita el agent: qm set <vmid> --agent enabled=1
+#   4. Convierte a template
 ###############################################################################
 
 set -euo pipefail
@@ -50,7 +58,7 @@ log() {
 validate_config() {
     local required_vars=(
         "PROXMOX_HOST" "PROXMOX_PORT" "PROXMOX_USER" "PROXMOX_PASSWORD"
-        "PROXMOX_NODE" "GITHUB_TOKEN" "VM_ISO" "VM_ISO_STORAGE" "VM_STORAGE"
+        "PROXMOX_NODE" "GITHUB_TOKEN" "VM_STORAGE"
     )
     for var in "${required_vars[@]}"; do
         if [[ -z "${!var:-}" ]]; then
@@ -109,11 +117,11 @@ create_vm_with_cloudinit() {
     local labels="$6"
     local token="$7"
 
-    log "Creando VM QEMU $vm_id ($vm_name) desde ISO con cloud-init..."
+    log "Creando VM QEMU $vm_id ($vm_name) con cloud-init..."
 
-    local memory="${VM_MEMORY:-1024}"
-    local cores="${VM_CPUS:-1}"
-    local disk="${VM_DISK:-16}"
+    local memory="${VM_MEMORY:-4096}"
+    local cores="${VM_CPUS:-4}"
+    local disk="${VM_DISK:-30}"
 
     local github_url
     if [[ -n "$repo" ]]; then
@@ -128,41 +136,41 @@ create_vm_with_cloudinit() {
     fi
     local download_url="https://github.com/actions/runner/releases/download/v${runner_version}/actions-runner-linux-x64-${runner_version}.tar.gz"
 
-    # Cloud-init user-data para autoinstall
-    cat > "$ROOT_DIR/logs/cloudinit-user-${vm_id}.yaml" << CIEOF
-#cloud-config
-autoinstall:
-  version: 1
-  identity:
-    hostname: ${vm_name}
-    username: ${RUNNER_USER}
-    password: "\$6\$rounds=4096\$runner\$xQHBVp8zKjLqFz3rJHqGj5YKp0xZQxZxZxZxZxZxZxZ"
-  ssh:
-    install-server: true
-    allow-pw: true
-  late-commands:
-    - echo '${RUNNER_USER} ALL=(ALL) NOPASSWD:ALL' > /target/etc/sudoers.d/runner
-    - chmod 440 /target/etc/sudoers.d/runner
-CIEOF
+    # Generar password hash para cloud-init
+    local runner_password="RunnerSetup2024!"
 
-    # Script post-instalacion
-    cat > "$ROOT_DIR/logs/cloudinit-runcmd-${vm_id}.sh" << 'SCRIPTEOF'
+    # Script de configuracion post-boot (se inyecta via cloud-init runcmd)
+    # Las variables se sustituyen AQUI antes de escribir el archivo
+    cat > "$ROOT_DIR/logs/setup-script-${vm_id}.sh" << RUNNEREOF
 #!/bin/bash
 set -e
 exec > >(tee /var/log/runner-setup.log) 2>&1
 
+RUNNER_USER="${RUNNER_USER}"
+RUNNER_NAME="${runner_name}"
+GITHUB_URL="${github_url}"
+RUNNER_TOKEN="${token}"
+LABELS="${labels}"
+DOWNLOAD_URL="${download_url}"
+RUNNER_DIR="/home/\${RUNNER_USER}/actions-runner"
+
+echo "=== Iniciando configuracion del runner ==="
+
+# 1. Paquetes esenciales
 echo "[1/5] Instalando paquetes esenciales..."
 apt-get update -qq
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ca-certificates curl gnupg lsb-release git wget jq make build-essential pkg-config libssl-dev python3 python3-pip openssh-client rsync unzip zip tar gzip
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ca-certificates curl gnupg lsb-release git wget jq make build-essential pkg-config libssl-dev python3 python3-pip openssh-client rsync unzip zip tar gzip 2>/dev/null || true
 
+# 2. Docker Engine
 echo "[2/5] Instalando Docker Engine..."
 install -m 0755 -d /etc/apt/keyrings
 curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
 chmod a+r /etc/apt/keyrings/docker.gpg
-echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
+echo "deb [arch=\$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \$(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null
 apt-get update -qq
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin 2>/dev/null || true
 
+# 3. Configurar Docker
 echo "[3/5] Configurando Docker..."
 mkdir -p /etc/systemd/system/docker.service.d /etc/docker /var/lib/docker
 cat > /etc/systemd/system/docker.service.d/override.conf << 'DEOF'
@@ -184,54 +192,49 @@ systemctl daemon-reload
 systemctl enable docker
 systemctl restart docker
 
+# 4. Configurar usuario y runner
 echo "[4/5] Instalando GitHub Actions runner..."
-RUNNER_USER_PLACEHOLDER='${RUNNER_USER}'
-RUNNER_NAME_PLACEHOLDER='${runner_name}'
-GITHUB_URL_PLACEHOLDER='${github_url}'
-RUNNER_TOKEN_PLACEHOLDER='${token}'
-LABELS_PLACEHOLDER='${labels}'
-DOWNLOAD_URL_PLACEHOLDER='${download_url}'
-RUNNER_DIR="/home/${RUNNER_USER_PLACEHOLDER}/actions-runner"
+useradd -m -s /bin/bash -G sudo,docker "\${RUNNER_USER}" 2>/dev/null || true
+echo "\${RUNNER_USER} ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/\${RUNNER_USER}
+chmod 440 /etc/sudoers.d/\${RUNNER_USER}
 
-mkdir -p "$RUNNER_DIR" "$RUNNER_DIR/_work"
-chown "${RUNNER_USER_PLACEHOLDER}:${RUNNER_USER_PLACEHOLDER}" "$RUNNER_DIR" "$RUNNER_DIR/_work"
-chmod 755 "$RUNNER_DIR/_work"
-usermod -aG docker "$RUNNER_USER_PLACEHOLDER" 2>/dev/null || true
+mkdir -p "\$RUNNER_DIR" "\$RUNNER_DIR/_work"
+chown \${RUNNER_USER}:\${RUNNER_USER} "\$RUNNER_DIR" "\$RUNNER_DIR/_work"
+chmod 755 "\$RUNNER_DIR/_work"
+usermod -aG docker "\${RUNNER_USER}"
 
-su - "$RUNNER_USER_PLACEHOLDER" -c "cd $RUNNER_DIR && curl -sL '$DOWNLOAD_URL_PLACEHOLDER' -o actions-runner.tar.gz && tar xzf actions-runner.tar.gz && rm actions-runner.tar.gz"
-su - "$RUNNER_USER_PLACEHOLDER" -c "cd $RUNNER_DIR && ./config.sh --unattended --url '$GITHUB_URL_PLACEHOLDER' --token '$RUNNER_TOKEN_PLACEHOLDER' --name '$RUNNER_NAME_PLACEHOLDER' --labels '$LABELS_PLACEHOLDER' --work '_work'"
+su - "\${RUNNER_USER}" -c "cd \$RUNNER_DIR && curl -sL '\$DOWNLOAD_URL' -o actions-runner.tar.gz && tar xzf actions-runner.tar.gz && rm actions-runner.tar.gz"
+su - "\${RUNNER_USER}" -c "cd \$RUNNER_DIR && ./config.sh --unattended --url '\$GITHUB_URL' --token '\$RUNNER_TOKEN' --name '\$RUNNER_NAME' --labels '\$LABELS' --work '_work'"
 
-cd "$RUNNER_DIR" && ./svc.sh install "$RUNNER_USER_PLACEHOLDER"
-cd "$RUNNER_DIR" && ./svc.sh start
+cd "\$RUNNER_DIR" && ./svc.sh install "\${RUNNER_USER}"
+cd "\$RUNNER_DIR" && ./svc.sh start
 
-chown -R "${RUNNER_USER_PLACEHOLDER}:${RUNNER_USER_PLACEHOLDER}" "$RUNNER_DIR"
-chmod -R 750 "$RUNNER_DIR"
-chmod 755 "$RUNNER_DIR/_work"
+chown -R \${RUNNER_USER}:\${RUNNER_USER} "\$RUNNER_DIR"
+chmod -R 750 "\$RUNNER_DIR"
+chmod 755 "\$RUNNER_DIR/_work"
 
+# 5. Verificar
 echo "[5/5] Verificando..."
 docker --version
 echo "=== Runner configurado exitosamente ==="
-SCRIPTEOF
-    chmod +x "$ROOT_DIR/logs/cloudinit-runcmd-${vm_id}.sh"
-    log "Cloud-init guardado: logs/cloudinit-user-${vm_id}.yaml"
+RUNNEREOF
+    chmod +x "$ROOT_DIR/logs/setup-script-${vm_id}.sh"
+    log "Script de setup guardado: logs/setup-script-${vm_id}.sh"
 
-    # Crear VM desde cero
-    log "Creando VM desde ISO..."
+    # Crear VM clonando desde template si existe, o desde ISO
     local create_params="vmid=${vm_id}"
     create_params+="&name=${vm_name}"
     create_params+="&memory=${memory}"
     create_params+="&cores=${cores}"
+    create_params+="&sockets=1"
     create_params+="&ostype=l26"
     create_params+="&machine=q35"
     create_params+="&cpu=host"
     create_params+="&agent=1"
     create_params+="&scsihw=virtio-scsi-pci"
     create_params+="&scsi0=${VM_STORAGE}:${disk}"
-    create_params+="&cdrom=${VM_ISO_STORAGE}:iso/${VM_ISO}"
     create_params+="&ide0=${VM_STORAGE}:cloudinit,media=cdrom"
     create_params+="&net0=virtio=BC:24:11:02:02:02,bridge=vmbr0"
-    # Boot desde CD-ROM (ISO de Ubuntu)
-    create_params+="&boot=order=ide2"
 
     local response
     response=$(proxmox_api_request "/nodes/$PROXMOX_NODE/qemu" "$create_params" "POST")
@@ -243,11 +246,11 @@ SCRIPTEOF
     fi
 
     log "VM creada: $vm_id"
-    log "Aplicando cloud-init..."
 
     # Aplicar cloud-init settings
+    log "Aplicando cloud-init..."
     local ci_params="ciuser=${RUNNER_USER}"
-    ci_params+="&cipassword=RunnerSetup2024!"
+    ci_params+="&cipassword=${runner_password}"
     ci_params+="&nameserver=8.8.8.8"
 
     response=$(proxmox_api_request "/nodes/$PROXMOX_NODE/qemu/$vm_id/config" "$ci_params" "PUT")
@@ -256,35 +259,26 @@ SCRIPTEOF
     log "Generando cloud-init ISO..."
     proxmox_api_request "/nodes/$PROXMOX_NODE/qemu/$vm_id/cloudinit" "" "POST" >/dev/null 2>&1
 
-    # Verificar configuracion
-    log "Verificando configuracion..."
-    proxmox_api_request "/nodes/$PROXMOX_NODE/qemu/$vm_id/config" "" "GET"
-
     # Iniciar VM
-    log "Iniciando VM (instalacion automatica: 15-20 min)..."
+    log "Iniciando VM..."
     proxmox_api_request "/nodes/$PROXMOX_NODE/qemu/$vm_id/status/start" "" "POST" >/dev/null 2>&1
 
-    # Esperar a que Ubuntu termine de instalarse
-    log "Esperando instalacion de Ubuntu (15-20 min)..."
-    local max_wait=1800
+    # Esperar a que la VM este lista (qemu agent responde)
+    log "Esperando a que la VM este lista..."
+    local max_wait=600
     local elapsed=0
 
     while [[ $elapsed -lt $max_wait ]]; do
-        local status
-        status=$(proxmox_api_request "/nodes/$PROXMOX_NODE/qemu/$vm_id/status/current" "" "GET" 2>/dev/null)
+        local agent_resp
+        agent_resp=$(proxmox_api_request "/nodes/$PROXMOX_NODE/qemu/$vm_id/agent/ping" "" "GET" 2>/dev/null)
 
-        if echo "$status" | grep -q '"running"'; then
-            # Verificar qemu agent (indica que Ubuntu esta listo)
-            local agent_resp
-            agent_resp=$(proxmox_api_request "/nodes/$PROXMOX_NODE/qemu/$vm_id/agent/ping" "" "GET" 2>/dev/null)
-            if echo "$agent_resp" | grep -qi '"data"'; then
-                log "VM lista y responsive"
-                break
-            fi
+        if echo "$agent_resp" | grep -qi '"data"'; then
+            log "VM lista y responsive"
+            break
         fi
 
         if [[ $((elapsed % 60)) -eq 0 && $elapsed -gt 0 ]]; then
-            log "   Instalando Ubuntu... (${elapsed}s/${max_wait}s)"
+            log "   Esperando... (${elapsed}s/${max_wait}s)"
         fi
 
         sleep 10
@@ -294,46 +288,56 @@ SCRIPTEOF
     # Configurar runner via QEMU agent exec
     log "Configurando runner..."
     local runcmd_script
-    runcmd_script=$(cat "$ROOT_DIR/logs/cloudinit-runcmd-${vm_id}.sh")
+    runcmd_script=$(cat "$ROOT_DIR/logs/setup-script-${vm_id}.sh")
 
-    # Usar QEMU agent exec directamente
     local ticket
-    ticket=$(get_proxmox_ticket)
+    ticket=$(get_proxmox_ticket 2>/dev/null)
     local csrf
-    csrf=$(get_proxmox_csrf)
+    csrf=$(get_proxmox_csrf 2>/dev/null)
 
     if [[ -n "$ticket" && -n "$csrf" ]]; then
         local agent_url="https://${PROXMOX_HOST}:${PROXMOX_PORT}/api2/json/nodes/${PROXMOX_NODE}/qemu/${vm_id}/agent/exec"
-        # Test first
+
+        # Test agent
         local test_resp
         test_resp=$(curl -s -k -X POST "$agent_url" \
-            --data-urlencode "command=bash" \
-            --data-urlencode "args[0]=-c" \
-            --data-urlencode "args[1]=echo test" \
+            --data-urlencode "command=echo" \
+            --data-urlencode "args[0]=test" \
             -H "Authorization: PVEAuthCookie=$ticket" \
             -H "CSRFPreventionToken: $csrf" \
             -H "Content-Type: application/x-www-form-urlencoded" 2>/dev/null)
 
         if echo "$test_resp" | grep -qi '"data"'; then
-            log "QEMU agent disponible - ejecutando configuracion..."
-            # Encode the script properly
-            local encoded_script
-            encoded_script=$(echo "$runcmd_script" | base64 -w 0 2>/dev/null || echo "$runcmd_script" | base64 | tr -d '\n')
-            
-            # Execute via agent: decode and run
+            log "QEMU agent disponible - ejecutando setup..."
+
+            # Escribir script en la VM y ejecutarlo
+            # Paso 1: escribir el script en /tmp
+            local escaped_script
+            escaped_script=$(echo "$runcmd_script" | sed "s/'/'\\\\''/g")
+
             curl -s -k -X POST "$agent_url" \
                 --data-urlencode "command=bash" \
                 --data-urlencode "args[0]=-c" \
-                --data-urlencode "args[1]=echo '$encoded_script' | base64 -d | bash" \
+                --data-urlencode "args[1]=cat > /tmp/setup-runner.sh << 'ENDOFSCRIPT'
+${runcmd_script}
+ENDOFSCRIPT" \
                 -H "Authorization: PVEAuthCookie=$ticket" \
                 -H "CSRFPreventionToken: $csrf" \
                 -H "Content-Type: application/x-www-form-urlencoded" >/dev/null 2>&1
 
-            log "Configuracion enviada al runner"
+            sleep 2
+
+            # Paso 2: ejecutar
+            curl -s -k -X POST "$agent_url" \
+                --data-urlencode "command=bash" \
+                --data-urlencode "args[0]=/tmp/setup-runner.sh" \
+                -H "Authorization: PVEAuthCookie=$ticket" \
+                -H "CSRFPreventionToken: $csrf" \
+                -H "Content-Type: application/x-www-form-urlencoded" >/dev/null 2>&1
+
+            log "Setup enviado al runner"
         else
-            log "QEMU agent no disponible - ejecutar manualmente:"
-            log "  pct push $vm_id $ROOT_DIR/logs/cloudinit-runcmd-${vm_id}.sh /opt/setup-runner.sh"
-            log "  pct exec $vm_id -- bash /opt/setup-runner.sh"
+            log "QEMU agent no disponible"
         fi
     fi
 
@@ -431,7 +435,7 @@ main() {
     log "================================================"
     log "Runner configurado"
     log "VM ID: $VM_ID"
-    log "Recursos: 1vCPU, ${VM_MEMORY:-1024}MB RAM, ${VM_DISK:-16}GB disco"
+    log "Recursos: ${VM_CPUS:-4}vCPU, ${VM_MEMORY:-4096}MB RAM, ${VM_DISK:-30}GB disco"
     log "Directorio: /home/$RUNNER_USER/actions-runner"
     log "Docker: Instalado y configurado"
     log "URL: https://github.com/${repo_or_org}/settings/actions/runners"
