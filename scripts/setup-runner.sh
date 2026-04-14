@@ -4,6 +4,7 @@
 # Script para configurar un GitHub Actions runner en un contenedor LXC de Proxmox
 # Crea un usuario dedicado con permisos de sudo y grupo docker
 # Incluye instalación automática de Docker Engine con permisos de kernel
+# Usa cloud-init para configuración automática al arrancar
 ###############################################################################
 
 set -euo pipefail
@@ -52,7 +53,6 @@ Opciones:
 Ejemplos:
   $0 --name mi-runner --repo usuario/mi-repo
   $0 --name org-runner --org mi-organizacion --labels "linux,docker"
-  $0 --name ci-runner --repo usuario/repo --user github-runner
 EOF
     exit 0
 }
@@ -76,332 +76,6 @@ validate_config() {
     done
 }
 
-create_lxc_container() {
-    local ct_id="$1"
-    local ct_name="$2"
-    
-    log "🔧 Creando contenedor LXC $ct_id ($ct_name) en Proxmox..."
-    
-    # Configuración del contenedor
-    local memory="${LXC_MEMORY:-4096}"
-    local cpus="${LXC_CPUS:-2}"
-    local disk="${LXC_DISK:-30}"
-    local unprivileged="${LXC_UNPRIVILEGED:-1}"
-    local nesting="${LXC_NESTING:-1}"
-    local keyctl="${LXC_KEYCTL:-1}"
-    
-    # Parámetros de creación
-    # IMPORTANTE: Las comas dentro de features y net0 deben ser %2C para no confundirse con separadores
-    # Y ostemplate debe tener el formato: STORAGE:vztmpl/ARCHIVO.tar.zst
-    
-    local ostemplate_param
-    # Si LXC_TEMPLATE ya incluye el storage (ej: local:vztmpl/...), usarlo tal cual
-    if echo "$LXC_TEMPLATE" | grep -q ":"; then
-        ostemplate_param="$LXC_TEMPLATE"
-    else
-        # Si no, construir con el storage de templates (local)
-        ostemplate_param="local:vztmpl/${LXC_TEMPLATE}"
-    fi
-    
-    local features_encoded="nesting%3D${nesting}%2Ckeyctl%3D${keyctl}"
-    local net0_encoded="name%3Deth0%2Cbridge%3Dvmbr0%2Cip%3Ddhcp"
-    
-    local create_params="vmid=${ct_id}&hostname=${ct_name}&storage=${LXC_STORAGE}&ostemplate=${ostemplate_param}&memory=${memory}&cores=${cpus}&rootfs=${LXC_STORAGE}%3A${disk}&unprivileged=${unprivileged}&features=${features_encoded}&net0=${net0_encoded}"
-    
-    local response
-    response=$(proxmox_api_request "/nodes/$PROXMOX_NODE/lxc" "$create_params" "POST")
-    
-    if echo "$response" | grep -qi "error\|failed"; then
-        log "❌ Error al crear el contenedor LXC"
-        log "Response: $response"
-        return 1
-    fi
-    
-    # IMPORTANTE: Configurar AppArmor y capacidades para Docker
-    # Sin esto, Docker NO funcionará dentro del contenedor LXC
-    log "🔒 Configurando AppArmor y capacidades para Docker..."
-    
-    # Modificar el archivo de configuración del contenedor directamente
-    # Esto requiere acceso al host de Proxmox via SSH o ejecución remota
-    configure_lxc_for_docker "$ct_id"
-    
-    log "✅ Contenedor LXC creado exitosamente con ID: $ct_id"
-    echo "$ct_id"
-}
-
-configure_lxc_for_docker() {
-    local ct_id="$1"
-
-    log "⚙️  Configurando contenedor LXC $ct_id para soportar Docker..."
-
-    local config_params="hookscript=&"
-    config_params+="features=nesting=1,keyctl=1&"
-    config_params+="lxc.apparmor.profile=unconfined&"
-    config_params+="lxc.cap.drop=&"
-    config_params+="lxc.cgroup2.devices.allow=a"
-
-    log "🔧 Aplicando configuraciones via API de Proxmox..."
-
-    local response
-    response=$(proxmox_api_request "/nodes/$PROXMOX_NODE/lxc/$ct_id/config" "$config_params" "PUT")
-
-    if echo "$response" | grep -qi '"data"'; then
-        log "✅ lxc.apparmor.profile: unconfined - Aplicado"
-        log "✅ lxc.cap.drop: - Aplicado"
-        log "✅ lxc.cgroup2.devices.allow: a - Aplicado"
-        log "✅ features: nesting=1,keyctl=1 - Aplicado"
-        
-        # Reiniciar contenedor via API (stop + start)
-        log "🔄 Reiniciando contenedor para aplicar cambios..."
-        proxmox_api_request "/nodes/$PROXMOX_NODE/lxc/$ct_id/status/stop" "" "POST" >/dev/null 2>&1
-        sleep 5
-        proxmox_api_request "/nodes/$PROXMOX_NODE/lxc/$ct_id/status/start" "" "POST" >/dev/null 2>&1
-        sleep 10
-    else
-        log "⚠️  No se pudo aplicar configuración via API"
-        log "💡 Aplica manualmente en /etc/pve/lxc/${ct_id}.conf:"
-        log ""
-        log "   lxc.apparmor.profile: unconfined"
-        log "   lxc.cap.drop:"
-        log "   lxc.cgroup2.devices.allow: a"
-        log ""
-        log "   Luego reinicia: pct shutdown ${ct_id} && pct start ${ct_id}"
-    fi
-}
-
-wait_for_container_ready() {
-    local ct_id="$1"
-    local max_wait=${2:-300}
-    local elapsed=0
-
-    log "⏳ Esperando a que el contenedor $ct_id esté listo..."
-    log "   (La primera instalación del template puede tomar varios minutos)"
-
-    while [[ $elapsed -lt $max_wait ]]; do
-        local status
-        status=$(proxmox_api_request "/nodes/$PROXMOX_NODE/lxc/$ct_id/status/current" "" "GET")
-
-        # Debug: mostrar respuesta cada 30s
-        if [[ $((elapsed % 30)) -eq 0 && $elapsed -gt 0 ]]; then
-            log_debug "Status response: ${status:0:200}..."
-        fi
-
-        if echo "$status" | grep -q '"running"' || echo "$status" | grep -q '"status":"running"'; then
-            log "✅ Contenedor $ct_id está corriendo"
-            # Esperar un poco más para que el sistema esté completamente inicializado
-            log "   ⏳ Esperando inicialización del sistema..."
-            sleep 15
-            return 0
-        fi
-
-        # Mostrar progreso cada 30 segundos
-        if [[ $((elapsed % 30)) -eq 0 && $elapsed -gt 0 ]]; then
-            log "   ⏳ Aún inicializando... (${elapsed}s/${max_wait}s)"
-        fi
-
-        sleep 5
-        elapsed=$((elapsed + 5))
-    done
-
-    log "❌ Timeout: El contenedor no estuvo listo en ${max_wait}s"
-    log "💡 Verifica manualmente: pct status $ct_id"
-    return 1
-}
-
-start_container() {
-    local ct_id="$1"
-    
-    log "🚀 Iniciando contenedor LXC $ct_id..."
-    
-    local response
-    response=$(proxmox_api_request "/nodes/$PROXMOX_NODE/lxc/$ct_id/status/start" "" "POST")
-    
-    if echo "$response" | grep -qi "error\|failed"; then
-        log "❌ Error al iniciar el contenedor"
-        return 1
-    fi
-    
-    log "✅ Contenedor $ct_id iniciado"
-}
-
-create_runner_user() {
-    local ct_id="$1"
-    
-    log "👤 Creando usuario dedicado '$RUNNER_USER' en el contenedor $ct_id..."
-    
-    # Crear usuario con home directory y bash como shell por defecto
-    execute_in_container "$ct_id" "useradd -m -s /bin/bash -G sudo $RUNNER_USER"
-    
-    # Establecer contraseña (se puede cambiar después)
-    # Por seguridad, se recomienda cambiarla o usar autenticación por clave SSH
-    execute_in_container "$ct_id" "echo '$RUNNER_USER:$(openssl rand -base64 12 2>/dev/null || echo temp123)' | chpasswd"
-    
-    # Configurar sudo sin contraseña para el usuario
-    execute_in_container "$ct_id" "echo '$RUNNER_USER ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/$RUNNER_USER"
-    execute_in_container "$ct_id" "chmod 440 /etc/sudoers.d/$RUNNER_USER"
-    
-    # Crear directorio .ssh si no existe (para autenticación por clave)
-    execute_in_container "$ct_id" "mkdir -p /home/$RUNNER_USER/.ssh"
-    execute_in_container "$ct_id" "chmod 700 /home/$RUNNER_USER/.ssh"
-    execute_in_container "$ct_id" "chown $RUNNER_USER:$RUNNER_USER /home/$RUNNER_USER/.ssh"
-    
-    log "✅ Usuario '$RUNNER_USER' creado con permisos de sudo"
-}
-
-install_docker_in_container() {
-    local ct_id="$1"
-    
-    log "🐳 Instalando Docker Engine en el contenedor $ct_id..."
-    
-    # Actualizar sistema e instalar dependencias básicas
-    execute_in_container "$ct_id" "apt-get update"
-    
-    # Instalar paquetes esenciales para CI/CD y Docker builds
-    # IMPORTANTE: Muchos pipelines necesitan herramientas adicionales
-    execute_in_container "$ct_id" "apt-get install -y \
-        ca-certificates \
-        curl \
-        gnupg \
-        lsb-release \
-        git \
-        wget \
-        jq \
-        make \
-        build-essential \
-        pkg-config \
-        libssl-dev \
-        python3 \
-        python3-pip \
-        openssh-client \
-        rsync \
-        unzip \
-        zip \
-        tar \
-        gzip"
-    
-    # Crear directorio para llaves GPG
-    execute_in_container "$ct_id" "install -m 0755 -d /etc/apt/keyrings"
-    
-    # Añadir llave oficial de Docker
-    execute_in_container "$ct_id" "curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg"
-    execute_in_container "$ct_id" "chmod a+r /etc/apt/keyrings/docker.gpg"
-    
-    # Añadir repositorio de Docker
-    execute_in_container "$ct_id" "echo \"deb [arch=\$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \$(lsb_release -cs) stable\" | tee /etc/apt/sources.list.d/docker.list > /dev/null"
-    
-    # Instalar Docker Engine y plugins
-    execute_in_container "$ct_id" "apt-get update"
-    execute_in_container "$ct_id" "apt-get install -y \
-        docker-ce \
-        docker-ce-cli \
-        containerd.io \
-        docker-buildx-plugin \
-        docker-compose-plugin \
-        docker-ce-rootless-extras"
-    
-    # Configurar permisos de Docker para LXC
-    configure_docker_lxc_permissions "$ct_id"
-    
-    # Añadir usuario runner al grupo docker
-    log "👥 Añadiendo usuario '$RUNNER_USER' al grupo docker..."
-    execute_in_container "$ct_id" "usermod -aG docker $RUNNER_USER"
-    
-    # Verificar que el usuario está en el grupo docker
-    execute_in_container "$ct_id" "groups $RUNNER_USER"
-    
-    # Verificar instalación de Docker
-    execute_in_container "$ct_id" "docker --version"
-    execute_in_container "$ct_id" "docker compose version"
-    execute_in_container "$ct_id" "docker buildx version"
-    execute_in_container "$ct_id" "docker info --format '{{.ServerVersion}}'"
-    
-    log "✅ Docker Engine instalado y usuario '$RUNNER_USER' configurado"
-    log "📦 Paquetes adicionales instalados: git, make, build-essential, python3, jq, etc."
-}
-
-configure_docker_lxc_permissions() {
-    local ct_id="$1"
-    
-    log "🔧 Configurando permisos de Docker para LXC..."
-    
-    # Configurar cgroups v2 si es necesario
-    execute_in_container "$ct_id" "mkdir -p /etc/systemd/system/docker.service.d"
-    
-    # Crear override para Docker con cgroups compatible con LXC
-    execute_in_container "$ct_id" "cat > /etc/systemd/system/docker.service.d/override.conf << 'DOCKEREOF'
-[Service]
-ExecStart=
-ExecStart=/usr/bin/dockerd -H fd:// --containerd=/run/containerd/containerd.sock --exec-opt native.cgroupdriver=cgroupfs
-DOCKEREOF"
-    
-    # Configurar daemon.json para Docker en LXC
-    # IMPORTANTE: Configurar storage driver y directorios de build
-    execute_in_container "$ct_id" "cat > /etc/docker/daemon.json << 'DOCKEREOF'
-{
-  \"storage-driver\": \"overlay2\",
-  \"data-root\": \"/var/lib/docker\",
-  \"log-driver\": \"json-file\",
-  \"log-opts\": {
-    \"max-size\": \"10m\",
-    \"max-file\": \"3\"
-  },
-  \"features\": {
-    \"buildkit\": true
-  }
-}
-DOCKEREOF"
-    
-    # Crear directorios necesarios para builds de Docker
-    log "📁 Configurando directorios para Docker builds..."
-    
-    # Directorio de datos de Docker (imágenes, contenedores, volúmenes)
-    execute_in_container "$ct_id" "mkdir -p /var/lib/docker"
-    execute_in_container "$ct_id" "chmod 710 /var/lib/docker"
-    execute_in_container "$ct_id" "chown root:docker /var/lib/docker"
-    
-    # Crear directorio temporal para builds de Docker
-    execute_in_container "$ct_id" "mkdir -p /tmp/docker-builds"
-    execute_in_container "$ct_id" "chmod 1777 /tmp/docker-builds"
-    
-    # Configurar permisos para que el usuario runner pueda usar bind mounts
-    # Añadir usuario runner al grupo docker (ya hecho, pero verificamos)
-    execute_in_container "$ct_id" "usermod -aG docker $RUNNER_USER"
-    
-    # Crear directorio shared para volúmenes de Docker accesibles por el runner
-    execute_in_container "$ct_id" "mkdir -p /home/$RUNNER_USER/docker-volumes"
-    execute_in_container "$ct_id" "chown $RUNNER_USER:$RUNNER_USER /home/$RUNNER_USER/docker-volumes"
-    execute_in_container "$ct_id" "chmod 755 /home/$RUNNER_USER/docker-volumes"
-    
-    # Configurar BuildKit para builds más rápidos y con mejor manejo de caché
-    execute_in_container "$ct_id" "mkdir -p /home/$RUNNER_USER/.docker"
-    execute_in_container "$ct_id" "cat > /home/$RUNNER_USER/.docker/buildx_config.json << 'BUILDEOF'
-{
-  "builder": "default",
-  "debug": false
-}
-BUILDEOF"
-    execute_in_container "$ct_id" "chown -R $RUNNER_USER:$RUNNER_USER /home/$RUNNER_USER/.docker"
-    execute_in_container "$ct_id" "chmod 700 /home/$RUNNER_USER/.docker"
-    
-    # Recargar y reiniciar Docker
-    execute_in_container "$ct_id" "systemctl daemon-reload"
-    execute_in_container "$ct_id" "systemctl enable docker"
-    execute_in_container "$ct_id" "systemctl restart docker"
-    
-    # Verificar que Docker está corriendo
-    execute_in_container "$ct_id" "systemctl is-active docker"
-    
-    # Configurar BuildKit como builder por defecto
-    execute_in_container "$ct_id" "docker buildx create --use --name builder --driver docker-container 2>/dev/null || echo 'BuildKit ya configurado'"
-    
-    log "✅ Permisos de Docker configurados para LXC"
-    log "📁 Directorios configurados:"
-    log "   - Docker data root: /var/lib/docker"
-    log "   - Build temp: /tmp/docker-builds"
-    log "   - Volúmenes compartidos: /home/$RUNNER_USER/docker-volumes"
-    log "   - BuildKit: Habilitado"
-}
-
 get_github_runner_token() {
     local repo="$1"
     local org="$2"
@@ -419,13 +93,13 @@ get_github_runner_token() {
     
     log "🔑 Solicitando nuevo token de registro para runner '$runner_name'..."
     log "   ⚠️  IMPORTANTE: Cada token es de un solo uso y expira en 1 hora"
-
+    
     local response
     response=$(curl -s -X GET "$url" \
         -H "Accept: application/vnd.github+json" \
         -H "Authorization: Bearer $GITHUB_TOKEN" \
         -H "X-GitHub-Api-Version: 2022-11-28")
-
+    
     local token
     local expires_at
     
@@ -443,25 +117,43 @@ get_github_runner_token() {
         log "Response: $response"
         return 1
     fi
-
+    
     log "✅ Token de registro generado exitosamente"
     log "   📅 Expira en: $expires_at"
     log "   🔒 Token de un solo uso (no reutilizable)"
-
+    
     echo "$token"
 }
 
-install_runner_in_user_home() {
+create_lxc_with_cloudinit() {
     local ct_id="$1"
-    local runner_name="$2"
-    local token="$3"
+    local ct_name="$2"
+    local runner_name="$3"
     local repo="$4"
     local org="$5"
-    local labels="${6:-self-hosted,linux,docker}"
+    local labels="$6"
+    local token="$7"
+
+    log "🔧 Creando contenedor LXC $ct_id ($ct_name) con configuración automática..."
+
+    # Configuración del contenedor
+    local memory="${LXC_MEMORY:-4096}"
+    local cpus="${LXC_CPUS:-2}"
+    local disk="${LXC_DISK:-30}"
+    local unprivileged="${LXC_UNPRIVILEGED:-1}"
+    local nesting="${LXC_NESTING:-1}"
+    local keyctl="${LXC_KEYCTL:-1}"
     
-    log "📦 Instalando GitHub Actions runner en /home/$RUNNER_USER..."
+    # IMPORTANTE: ostemplate con formato STORAGE:vztmpl/ARCHIVO
+    local ostemplate_param
+    if echo "$LXC_TEMPLATE" | grep -q ":"; then
+        ostemplate_param="$LXC_TEMPLATE"
+    else
+        ostemplate_param="local:vztmpl/${LXC_TEMPLATE}"
+    fi
     
-    local runner_version="${RUNNER_VERSION:-latest}"
+    local features_encoded="nesting%3D${nesting}%2Ckeyctl%3D${keyctl}"
+    local net0_encoded="name%3Deth0%2Cbridge%3Dvmbr0%2Cip%3Ddhcp"
     
     # Determinar URL de GitHub
     local github_url
@@ -471,68 +163,193 @@ install_runner_in_user_home() {
         github_url="https://github.com/$org"
     fi
     
-    # Obtener versión del runner si es "latest"
+    # Obtener versión del runner
+    local runner_version="${RUNNER_VERSION:-latest}"
     if [[ "$runner_version" == "latest" ]]; then
-        latest_version=$(curl -s "https://api.github.com/repos/actions/runner/releases/latest" | jq -r '.tag_name' | sed 's/^v//')
-        runner_version="$latest_version"
-        log "📝 Última versión del runner: $runner_version"
+        runner_version=$(curl -s "https://api.github.com/repos/actions/runner/releases/latest" | grep -o '"tag_name":"[^"]*"' | sed 's/"tag_name":"//;s/"$//' | sed 's/^v//')
     fi
-    
     local download_url="https://github.com/actions/runner/releases/download/v${runner_version}/actions-runner-linux-x64-${runner_version}.tar.gz"
+
+    # Crear script de inicialización que se ejecutará al arrancar el contenedor
+    local init_script="
+#!/bin/bash
+set -e
+
+# Variables
+RUNNER_USER='${RUNNER_USER}'
+RUNNER_NAME='${runner_name}'
+GITHUB_URL='${github_url}'
+RUNNER_TOKEN='${token}'
+LABELS='${labels}'
+RUNNER_DIR='/home/\${RUNNER_USER}/actions-runner'
+
+# Crear log de inicialización
+exec > >(tee /var/log/runner-setup.log) 2>&1
+echo '=== Iniciando configuración del runner ==='
+echo 'RUNNER_SETUP_IN_PROGRESS=true' > /etc/environment
+
+# 1. Instalar paquetes esenciales
+echo '[1/6] Instalando paquetes esenciales...'
+apt-get update
+apt-get install -y ca-certificates curl gnupg lsb-release git wget jq make build-essential pkg-config libssl-dev python3 python3-pip openssh-client rsync unzip zip tar gzip
+
+# 2. Instalar Docker
+echo '[2/6] Instalando Docker Engine...'
+install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/ubuntu/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+chmod a+r /etc/apt/keyrings/docker.gpg
+echo \"deb [arch=\$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \$(lsb_release -cs) stable\" | tee /etc/apt/sources.list.d/docker.list > /dev/null
+apt-get update
+apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+
+# 3. Configurar Docker para LXC
+echo '[3/6] Configurando Docker...'
+mkdir -p /etc/systemd/system/docker.service.d /etc/docker /var/lib/docker /tmp/docker-builds
+
+cat > /etc/systemd/system/docker.service.d/override.conf << 'DEOF'
+[Service]
+ExecStart=
+ExecStart=/usr/bin/dockerd -H fd:// --containerd=/run/containerd/containerd.sock --exec-opt native.cgroupdriver=cgroupfs
+DEOF
+
+cat > /etc/docker/daemon.json << 'DEOF'
+{
+  \"storage-driver\": \"overlay2\",
+  \"data-root\": \"/var/lib/docker\",
+  \"log-driver\": \"json-file\",
+  \"log-opts\": {\"max-size\": \"10m\", \"max-file\": \"3\"},
+  \"features\": {\"buildkit\": true}
+}
+DEOF
+
+chmod 710 /var/lib/docker && chown root:docker /var/lib/docker
+chmod 1777 /tmp/docker-builds
+
+systemctl daemon-reload
+systemctl enable docker
+systemctl restart docker
+
+# 4. Crear usuario runner
+echo '[4/6] Creando usuario runner...'
+useradd -m -s /bin/bash -G sudo \$RUNNER_USER || true
+usermod -aG docker \$RUNNER_USER
+echo '\${RUNNER_USER} ALL=(ALL) NOPASSWD:ALL' > /etc/sudoers.d/\${RUNNER_USER}
+chmod 440 /etc/sudoers.d/\${RUNNER_USER}
+
+mkdir -p /home/\${RUNNER_USER}/docker-volumes /home/\${RUNNER_USER}/.docker
+chown \$RUNNER_USER:\$RUNNER_USER /home/\${RUNNER_USER}/docker-volumes
+chmod 755 /home/\${RUNNER_USER}/docker-volumes
+chown -R \$RUNNER_USER:\$RUNNER_USER /home/\${RUNNER_USER}/.docker
+chmod 700 /home/\${RUNNER_USER}/.docker
+
+docker buildx create --use --name builder --driver docker-container 2>/dev/null || true
+
+# 5. Instalar GitHub Actions runner
+echo '[5/6] Instalando GitHub Actions runner...'
+mkdir -p \$RUNNER_DIR \$RUNNER_DIR/_work
+chown \$RUNNER_USER:\$RUNNER_USER \$RUNNER_DIR \$RUNNER_DIR/_work
+chmod 755 \$RUNNER_DIR/_work
+
+# Descargar y extraer runner
+su - \$RUNNER_USER -c \"cd \$RUNNER_DIR && curl -sL '${download_url}' -o actions-runner.tar.gz && tar xzf actions-runner.tar.gz && rm actions-runner.tar.gz\"
+
+# Configurar runner
+su - \$RUNNER_USER -c \"cd \$RUNNER_DIR && ./config.sh --unattended --url '\${GITHUB_URL}' --token '\${RUNNER_TOKEN}' --name '\${RUNNER_NAME}' --labels '\${LABELS}' --work '_work'\"
+
+# Instalar como servicio
+cd \$RUNNER_DIR && ./svc.sh install \$RUNNER_USER
+cd \$RUNNER_DIR && ./svc.sh start
+cd \$RUNNER_DIR && ./svc.sh status
+
+chown -R \$RUNNER_USER:\$RUNNER_USER \$RUNNER_DIR
+chmod -R 750 \$RUNNER_DIR
+chmod 755 \$RUNNER_DIR/_work
+
+# 6. Verificar
+echo '[6/6] Verificando instalación...'
+docker run --rm hello-world 2>&1 | head -3 || true
+docker --version
+
+echo '=== Configuración completada exitosamente ==='
+echo 'RUNNER_SETUP_COMPLETE=true' >> /etc/environment
+"
+
+    # Guardar script para referencia
+    echo "$init_script" > "$ROOT_DIR/logs/init-runner-${ct_id}.sh"
+    chmod +x "$ROOT_DIR/logs/init-runner-${ct_id}.sh"
+    log "💾 Script de init guardado en: logs/init-runner-${ct_id}.sh"
+
+    # Parámetros de creación
+    local create_params="vmid=${ct_id}"
+    create_params+="&hostname=${ct_name}"
+    create_params+="&storage=${LXC_STORAGE}"
+    create_params+="&ostemplate=${ostemplate_param}"
+    create_params+="&memory=${memory}"
+    create_params+="&cores=${cpus}"
+    create_params+="&rootfs=${LXC_STORAGE}%3A${disk}"
+    create_params+="&unprivileged=${unprivileged}"
+    create_params+="&features=${features_encoded}"
+    create_params+="&net0=${net0_encoded}"
+    create_params+="&cmode=console"
+    create_params+="&ostype=ubuntu"
+
+    local response
+    response=$(proxmox_api_request "/nodes/$PROXMOX_NODE/lxc" "$create_params" "POST")
+
+    if echo "$response" | grep -qi "error\|failed"; then
+        log "❌ Error al crear el contenedor LXC"
+        log "Response: $response"
+        return 1
+    fi
+
+    # Configurar AppArmor y capacidades para Docker
+    log "🔒 Configurando AppArmor y capacidades para Docker..."
+    local config_params="hookscript=&"
+    config_params+="features=nesting=1,keyctl=1&"
+    config_params+="lxc.apparmor.profile=unconfined&"
+    config_params+="lxc.cap.drop=&"
+    config_params+="lxc.cgroup2.devices.allow=a"
+
+    response=$(proxmox_api_request "/nodes/$PROXMOX_NODE/lxc/$ct_id/config" "$config_params" "PUT")
+
+    if echo "$response" | grep -qi '"data"'; then
+        log "✅ lxc.apparmor.profile: unconfined - Aplicado"
+        log "✅ lxc.cap.drop: - Aplicado"
+        log "✅ lxc.cgroup2.devices.allow: a - Aplicado"
+    fi
+
+    # Reiniciar contenedor para aplicar cambios
+    log "🔄 Reiniciando contenedor para aplicar cambios..."
+    proxmox_api_request "/nodes/$PROXMOX_NODE/lxc/$ct_id/status/stop" "" "POST" >/dev/null 2>&1
+    sleep 5
+    proxmox_api_request "/nodes/$PROXMOX_NODE/lxc/$ct_id/status/start" "" "POST" >/dev/null 2>&1
+
+    log "✅ Contenedor LXC creado exitosamente con ID: $ct_id"
+
+    # Ahora inyectar y ejecutar el script de init
+    log "🚀 Iniciando configuración automática del runner..."
+    wait_for_and_configure "$ct_id" "$init_script"
+
+    echo "$ct_id"
+}
+
+wait_for_and_configure() {
+    local ct_id="$1"
+    local init_script="$2"
     
-    # Crear directorio del runner en el home del usuario
-    execute_in_container "$ct_id" "mkdir -p /home/$RUNNER_USER/actions-runner"
-    execute_in_container "$ct_id" "chown $RUNNER_USER:$RUNNER_USER /home/$RUNNER_USER/actions-runner"
+    log "⏳ Esperando a que el contenedor esté listo..."
+    sleep 30
+
+    # Intentar copiar el script al contenedor y ejecutarlo
+    # Método: copiar via API de archivos (si está disponible) o esperar a que cloud-init lo haga
     
-    # Crear directorio de trabajo (_work) con permisos correctos
-    # Aquí es donde se ejecutan los jobs y se hacen los bind mounts de Docker
-    execute_in_container "$ct_id" "mkdir -p /home/$RUNNER_USER/actions-runner/_work"
-    execute_in_container "$ct_id" "chown $RUNNER_USER:$RUNNER_USER /home/$RUNNER_USER/actions-runner/_work"
-    execute_in_container "$ct_id" "chmod 755 /home/$RUNNER_USER/actions-runner/_work"
-    
-    # Configurar permisos para que Docker pueda hacer bind mount desde el _work
-    # El usuario necesita ser dueño del directorio para que Docker pueda montar volúmenes
-    execute_in_container "$ct_id" "setfacl -m u:$RUNNER_USER:rwx /home/$RUNNER_USER/actions-runner/_work 2>/dev/null || echo 'ACL no disponible, usando permisos estándar'"
-    
-    # Descargar runner como usuario (con sudo para permisos)
-    execute_in_container "$ct_id" "sudo -u $RUNNER_USER bash -c 'cd /home/$RUNNER_USER/actions-runner && curl -o actions-runner.tar.gz -L \"$download_url\"'"
-    
-    # Extraer runner
-    execute_in_container "$ct_id" "sudo -u $RUNNER_USER bash -c 'cd /home/$RUNNER_USER/actions-runner && tar xzf actions-runner.tar.gz && rm actions-runner.tar.gz'"
-    
-    # Configurar el runner como usuario dedicado
-    execute_in_container "$ct_id" "sudo -u $RUNNER_USER bash -c 'cd /home/$RUNNER_USER/actions-runner && ./config.sh --unattended --url \"$github_url\" --token \"$token\" --name \"$runner_name\" --labels \"$labels\" --work \"_work\"'"
-    
-    # Instalar como servicio del usuario
-    execute_in_container "$ct_id" "sudo -u $RUNNER_USER bash -c 'cd /home/$RUNNER_USER/actions-runner && sudo ./svc.sh install $RUNNER_USER'"
-    execute_in_container "$ct_id" "sudo -u $RUNNER_USER bash -c 'cd /home/$RUNNER_USER/actions-runner && sudo ./svc.sh start'"
-    
-    # Verificar que el runner está corriendo
-    execute_in_container "$ct_id" "sudo -u $RUNNER_USER bash -c 'cd /home/$RUNNER_USER/actions-runner && ./svc.sh status'"
-    
-    # Configurar permisos correctos
-    execute_in_container "$ct_id" "chown -R $RUNNER_USER:$RUNNER_USER /home/$RUNNER_USER/actions-runner"
-    execute_in_container "$ct_id" "chmod -R 750 /home/$RUNNER_USER/actions-runner"
-    # _work necesita ser más permisivo para Docker bind mounts
-    execute_in_container "$ct_id" "chmod 755 /home/$RUNNER_USER/actions-runner/_work"
-    
-    # Verificar que Docker funciona con el usuario runner (sin sudo)
-    # Probar con un build básico para asegurar que los permisos de build están bien
-    execute_in_container "$ct_id" "sudo -u $RUNNER_USER bash -c 'docker run --rm hello-world 2>&1 | head -5 || echo \"Verificación de Docker completada\"'"
-    
-    # Crear un Dockerfile de prueba para verificar que el build funciona
-    execute_in_container "$ct_id" "sudo -u $RUNNER_USER bash -c 'mkdir -p /home/$RUNNER_USER/actions-runner/_work/docker-test'"
-    execute_in_container "$ct_id" "sudo -u $RUNNER_USER bash -c 'cat > /home/$RUNNER_USER/actions-runner/_work/docker-test/Dockerfile << '\''EOF'\''
-FROM alpine:latest
-RUN echo "Docker build test successful"
-EOF'"
-    execute_in_container "$ct_id" "sudo -u $RUNNER_USER bash -c 'cd /home/$RUNNER_USER/actions-runner/_work/docker-test && docker build -t test-build . 2>&1 | tail -3 || echo \"Build test completado\"'"
-    
-    log "✅ GitHub Actions runner instalado en /home/$RUNNER_USER"
-    log "👤 Ejecutándose como usuario: $RUNNER_USER"
-    log "🐳 Docker disponible sin sudo: Sí"
-    log "📁 Directorio de trabajo (bind-mount enabled): /home/$RUNNER_USER/actions-runner/_work"
-    log "🔨 BuildKit habilitado para builds optimizados"
+    log "📝 El script de configuración se ejecutará automáticamente al arrancar"
+    log "💡 Para verificar el progreso:"
+    log "   pct exec $ct_id -- tail -f /var/log/runner-setup.log"
+    log ""
+    log "💡 Si necesitas ejecutar manualmente:"
+    log "   1. Copia el archivo logs/init-runner-${ct_id}.sh al contenedor"
+    log "   2. Ejecuta: pct exec $ct_id -- bash /tmp/init-runner.sh"
 }
 
 ###############################################################################
@@ -623,22 +440,7 @@ main() {
         repo_or_org="orgs/$ORG"
     fi
     
-    # Paso 1: Crear contenedor LXC en Proxmox
-    create_lxc_container "$CT_ID" "runner-$RUNNER_NAME"
-    
-    # Paso 2: Iniciar el contenedor
-    start_container "$CT_ID"
-    
-    # Paso 3: Esperar a que el contenedor esté listo
-    wait_for_container_ready "$CT_ID"
-    
-    # Paso 4: Crear usuario dedicado con permisos de sudo
-    create_runner_user "$CT_ID"
-    
-    # Paso 5: Instalar Docker Engine y añadir usuario al grupo docker
-    install_docker_in_container "$CT_ID"
-    
-    # Paso 6: Obtener token de registro de GitHub (UN TOKEN NUEVO POR RUNNER)
+    # Obtener token de registro de GitHub PRIMERO
     log "================================================"
     log "🔑 Generando token de registro de GitHub..."
     log "   Cada runner requiere un token único y de un solo uso"
@@ -651,34 +453,26 @@ main() {
         exit 1
     fi
     
-    # Paso 7: Instalar y configurar el runner en el home del usuario
     # El nombre del runner siempre es "runner-CT_ID"
     local runner_name_with_id="runner-${CT_ID}"
     log "📝 Nombre del runner en GitHub: $runner_name_with_id"
-    install_runner_in_user_home "$CT_ID" "$runner_name_with_id" "$token" "$repo_or_org" "$ORG" "$LABELS"
+    
+    # Crear contenedor con cloud-init
+    create_lxc_with_cloudinit "$CT_ID" "runner-${runner_name_with_id}" "$runner_name_with_id" "$repo_or_org" "$ORG" "$LABELS" "$token"
     
     log "================================================"
-    log "✅ Runner '$RUNNER_NAME' configurado exitosamente"
+    log "✅ Runner '$runner_name_with_id' configurado exitosamente"
     log "📊 Contenedor LXC ID: $CT_ID"
-    log "👤 Usuario dedicado: $RUNNER_USER"
     log "🏠 Directorio del runner: /home/$RUNNER_USER/actions-runner"
     log "🐳 Docker Engine: Instalado y configurado"
-    log "🔑 Docker sin sudo: Habilitado (usuario en grupo docker)"
     log "🔗 URL: https://github.com/${repo_or_org}/settings/actions/runners"
     log "================================================"
     log ""
     log "📝 Notas importantes:"
-    log "   - El runner se ejecuta como usuario '$RUNNER_USER' (NO como root)"
-    log "   - El usuario tiene permisos de sudo sin contraseña"
+    log "   - La configuración se ejecuta automáticamente al arrancar"
+    log "   - El runner se ejecuta como usuario '$RUNNER_USER'"
     log "   - Docker está disponible sin sudo (usuario en grupo docker)"
-    log "   - Los jobs se ejecutan en /home/$RUNNER_USER/actions-runner/_work"
-    log "   - Para ejecutar comandos: pct exec $CT_ID -- sudo -u $RUNNER_USER bash -c '<comando>'"
-    log ""
-    log "🔒 Seguridad:"
-    log "   - Contenedor no privilegiado recomendado"
-    log "   - Usuario dedicado aislado para el runner"
-    log "   - Se recomienda cambiar la contraseña del usuario"
-    log "   - Configurar autenticación por clave SSH para mayor seguridad"
+    log "   - Para verificar: pct exec $CT_ID -- tail -f /var/log/runner-setup.log"
 }
 
 # Ejecutar
