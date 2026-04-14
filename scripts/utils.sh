@@ -37,19 +37,26 @@ execute_in_container() {
     fi
     
     # Ejecutar vía API de Proxmox: POST /nodes/{node}/lxc/{vmid}/exec
-    # Formato correcto: args como array indexado
+    # Este endpoint ejecuta comandos directamente en el contenedor via namespaces del kernel
     local exec_response
-    exec_response=$(curl -s -k -X POST \
+    exec_response=$(curl -s -k -w "\n%{http_code}" -X POST \
         "https://${PROXMOX_HOST}:${PROXMOX_PORT}/api2/json/nodes/${PROXMOX_NODE}/lxc/${ct_id}/exec" \
         --data-urlencode "command=bash" \
         --data-urlencode "args[0]=-c" \
         --data-urlencode "args[1]=$full_cmd" \
+        --data-urlencode "timeout=120" \
         -H "Authorization: PVEAuthCookie=$ticket" \
         -H "Content-Type: application/x-www-form-urlencoded" 2>/dev/null)
     
+    # Extraer código HTTP y cuerpo de respuesta
+    local http_code
+    http_code=$(echo "$exec_response" | tail -1)
+    exec_response=$(echo "$exec_response" | sed '$d')
+    
     # Debug: mostrar respuesta cruda si falla
-    if ! echo "$exec_response" | grep -qi '"data"'; then
-        log_debug "API raw response: ${exec_response:0:500}"
+    if [[ "$http_code" != "200" ]]; then
+        log "   ❌ HTTP $http_code - Response: ${exec_response:0:300}"
+        return 1
     fi
     
     # Verificar respuesta
